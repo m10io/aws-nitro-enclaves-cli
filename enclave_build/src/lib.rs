@@ -26,6 +26,8 @@ pub struct Docker2Eif<'a> {
     artifacts_prefix: String,
     output: &'a mut File,
     sign_info: Option<SignEnclaveInfo>,
+    cmd_params: Vec<String>,
+    env_bindings: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -58,6 +60,8 @@ impl<'a> Docker2Eif<'a> {
         artifacts_prefix: String,
         certificate_path: &Option<String>,
         key_path: &Option<String>,
+        cmd_params: Vec<String>,
+        env_bindings: Vec<String>,
     ) -> Result<Self, Docker2EifError> {
         let docker = DockerUtil::new(docker_image.clone());
 
@@ -93,6 +97,8 @@ impl<'a> Docker2Eif<'a> {
             output,
             artifacts_prefix,
             sign_info,
+            cmd_params,
+            env_bindings,
         })
     }
 
@@ -118,10 +124,13 @@ impl<'a> Docker2Eif<'a> {
     }
 
     pub fn create(&mut self) -> Result<BTreeMap<String, String>, Docker2EifError> {
-        let (cmd_file, env_file) = self.docker.load().map_err(|e| {
-            eprintln!("Docker error: {:?}", e);
-            Docker2EifError::DockerError
-        })?;
+        let (cmd_file, env_file) = self
+            .docker
+            .load(self.cmd_params.clone(), self.env_bindings.clone())
+            .map_err(|e| {
+                eprintln!("Docker error: {:?}", e);
+                Docker2EifError::DockerError
+            })?;
 
         let yaml_generator = YamlGenerator::new(
             self.docker_image.clone(),

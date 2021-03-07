@@ -79,6 +79,22 @@ fn main() {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("cmd-params")
+                .long("cmd")
+                .help("Cmd to launch from Docker image")
+                .multiple(true)
+                .value_terminator(";")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("env-bindings")
+                .long("env")
+                .multiple(true)
+                .value_terminator(";")
+                .help("Env to use when launch from Docker image")
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("build")
                 .short("b")
                 .long("build")
@@ -111,6 +127,14 @@ fn main() {
         Some(key) => Some(key.to_string()),
         None => None,
     };
+    let cmd = match matches.values_of("cmd-params") {
+        Some(iter) => iter.map(str::to_string).collect::<Vec<String>>(),
+        None => vec![],
+    };
+    let env = match matches.values_of("env-bindings") {
+        Some(iter) => iter.map(str::to_string).collect::<Vec<String>>(),
+        None => vec![],
+    };
     let mut output = OpenOptions::new()
         .read(true)
         .write(true)
@@ -129,6 +153,8 @@ fn main() {
         ".".to_string(),
         &signing_certificate,
         &private_key,
+        cmd,
+        env,
     )
     .unwrap();
 

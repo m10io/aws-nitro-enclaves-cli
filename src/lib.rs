@@ -65,6 +65,8 @@ pub fn build_enclaves(args: BuildEnclavesArgs) -> NitroCliResult<()> {
         &args.output,
         &args.signing_certificate,
         &args.private_key,
+        &args.cmd_params,
+        &args.env_bindings,
     )
     .map_err(|e| e.add_subaction("Failed to build EIF from docker".to_string()))?;
     Ok(())
@@ -77,6 +79,8 @@ pub fn build_from_docker(
     output_path: &str,
     signing_certificate: &Option<String>,
     private_key: &Option<String>,
+    cmd_params: &Vec<String>,
+    env_bindings: &Vec<String>,
 ) -> NitroCliResult<(File, BTreeMap<String, String>)> {
     let blobs_path =
         blobs_path().map_err(|e| e.add_subaction("Failed to retrieve blobs path".to_string()))?;
@@ -123,6 +127,8 @@ pub fn build_from_docker(
         artifacts_path()?,
         signing_certificate,
         private_key,
+        cmd_params.clone(),
+        env_bindings.clone(),
     )
     .map_err(|err| {
         new_nitro_cli_failure!(
@@ -447,7 +453,23 @@ macro_rules! create_app {
                             .long("private-key")
                             .help("Local path to developer's Eliptic Curve private key.")
                             .takes_value(true),
-                    ),
+                    )
+                    .arg(
+                        Arg::with_name("cmd-params")
+                            .long("cmd")
+                            .help("Cmd to launch from Docker image")
+                            .multiple(true)
+                            .value_terminator(";")
+                            .takes_value(true),
+                )
+        .arg(
+            Arg::with_name("env-bindings")
+                .long("env")
+                .multiple(true)
+                .value_terminator(";")
+                .help("Env to use when launch from Docker image")
+                .takes_value(true),
+        ),
             )
             .subcommand(
                 SubCommand::with_name("describe-enclaves")

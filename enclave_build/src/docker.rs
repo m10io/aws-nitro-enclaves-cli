@@ -336,8 +336,21 @@ impl DockerUtil {
     /// The main function of this struct. This needs to be called in order to
     /// extract the necessary configuration values from the docker image with
     /// the tag provided in the constructor
-    pub fn load(&self) -> Result<(NamedTempFile, NamedTempFile), DockerError> {
-        let (cmd, env) = self.inspect_image()?;
+    pub fn load(
+        &self,
+        mut cmd: Vec<String>,
+        mut env: Vec<String>,
+    ) -> Result<(NamedTempFile, NamedTempFile), DockerError> {
+        if cmd.is_empty() || env.is_empty() {
+            let (new_cmd, new_env) = self.inspect_image()?;
+            if cmd.is_empty() {
+                cmd = new_cmd;
+            }
+
+            if env.is_empty() {
+                env = new_env;
+            }
+        }
 
         let cmd_file = write_config(cmd)?;
         let env_file = write_config(env)?;

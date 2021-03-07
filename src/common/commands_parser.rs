@@ -93,6 +93,10 @@ pub struct BuildEnclavesArgs {
     pub signing_certificate: Option<String>,
     /// The path to the private key for signed enclaves.
     pub private_key: Option<String>,
+    /// The command to run inside of the enclave
+    pub cmd_params: Vec<String>,
+    /// The env bindings for use inside of the enclave
+    pub env_bindings: Vec<String>,
 }
 
 impl BuildEnclavesArgs {
@@ -119,6 +123,9 @@ impl BuildEnclavesArgs {
             _ => (),
         };
 
+        let cmd_params = parse_cmd_params(args);
+        let env_bindings = parse_env_bindings(args);
+
         Ok(BuildEnclavesArgs {
             docker_uri: parse_docker_tag(args).ok_or_else(|| {
                 new_nitro_cli_failure!(
@@ -137,6 +144,8 @@ impl BuildEnclavesArgs {
             })?,
             signing_certificate,
             private_key,
+            cmd_params,
+            env_bindings,
         })
     }
 }
@@ -377,6 +386,18 @@ fn parse_signing_certificate(args: &ArgMatches) -> Option<String> {
 
 fn parse_private_key(args: &ArgMatches) -> Option<String> {
     args.value_of("private-key").map(|val| val.to_string())
+}
+
+fn parse_cmd_params(args: &ArgMatches) -> Vec<String> {
+    args.values_of("cmd-params")
+        .map(|iter| iter.map(str::to_string).collect::<Vec<String>>())
+        .unwrap_or_default()
+}
+
+fn parse_env_bindings(args: &ArgMatches) -> Vec<String> {
+    args.values_of("env-bindings")
+        .map(|iter| iter.map(str::to_string).collect::<Vec<String>>())
+        .unwrap_or_default()
 }
 
 fn parse_error_code_str(args: &ArgMatches) -> NitroCliResult<String> {
