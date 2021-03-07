@@ -184,16 +184,17 @@ impl<'a> Docker2Eif<'a> {
             return Err(Docker2EifError::LinuxkitExecError);
         }
 
-        let arch = self.docker.architecture().map_err(|e| {
-            eprintln!("Docker error: {:?}", e);
-            Docker2EifError::DockerError
-        })?;
+        // let arch = self.docker.architecture().map_err(|e| {
+        //     eprintln!("Docker error: {:?}", e);
+        //     Docker2EifError::DockerError
+        // })?;
 
-        let flags = match arch.as_str() {
-            docker::DOCKER_ARCH_ARM64 => EIF_HDR_ARCH_ARM64,
-            docker::DOCKER_ARCH_AMD64 => 0,
-            _ => return Err(Docker2EifError::UnsupportedArchError),
-        };
+        // let flags = match arch.as_str() {
+        //     docker::DOCKER_ARCH_ARM64 => EIF_HDR_ARCH_ARM64,
+        //     docker::DOCKER_ARCH_AMD64 => 0,
+        //     _ => return Err(Docker2EifError::UnsupportedArchError),
+        // };
+        let flags = 0;
 
         let mut build = EifBuilder::new(
             &Path::new(&self.kernel_img_path),
