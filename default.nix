@@ -1,25 +1,25 @@
 { system ? builtins.currentSystem
 , rust-overlay ? import (builtins.fetchTarball {
-    url = https://github.com/oxalica/rust-overlay/archive/1b723f746e48ea9500007d17c41ad19441b88276.tar.gz;
-    sha256 = "1gx1528zp3sj9dk53szmi1pab8jjqmlmrbxygbx9ak33bq9nsiv1";
+    url = https://github.com/oxalica/rust-overlay/archive/095702e63a40e86f339d11864da9dc965b70a01e.tar.gz;
+    sha256 = "0q8bhriprl2g8im4civ4nvhamyh6y0j41z8q173psb4l6b5gwc9k";
   })
-, cargo2nix ? import "${(builtins.fetchTarball {
-    url = https://github.com/sphw/cargo2nix/archive/8edd83a16b4dc304c23bcee48f77894863c1eab4.tar.gz;
-    sha256 = "08jai58alwyi55v918dp6n9fzdnv2iqb0ixs91l7r4hs38bz2aca";
-  })}/overlay"
+, cargo2nix ? (import (builtins.fetchTarball {
+    url = https://github.com/cargo2nix/cargo2nix/archive/release-0.12.tar.gz;
+    sha256 = "0dh2vwh1bj35jg001ykml1mw1c6ij7z0pwx3rf6ywxvl9xngpsp6";
+  })).overlay
 , pkgs ? (import <nixpkgs> {
     inherit system;
     overlays = [ cargo2nix rust-overlay ];
   })
 }:
 let
-  rustPkgs = pkgs.rustBuilder.makePackageSet' {
-    rustChannel = "1.54.0";
+  rustPkgs = pkgs.rustBuilder.makePackageSet {
+    rustVersion = "1.78.0";
     packageFun = import ./Cargo.nix;
-    localPatterns = [
-      ''^(src|tests|templates||include|)(/.*)?''
-      ''[^/]*\.(rs|toml|sql|h)$''
-    ];
+#    localPatterns = [
+#      ''^(src|tests|templates||include|)(/.*)?''
+#      ''[^/]*\.(rs|toml|sql|h)$''
+#    ];
     packageOverrides = pkgs: pkgs.rustBuilder.overrides.all ++ [
       (pkgs.rustBuilder.rustLib.makeOverride {
         name = "nitro-cli";
