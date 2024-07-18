@@ -16,6 +16,7 @@ let
   rustPkgs = pkgs.rustBuilder.makePackageSet {
     rustVersion = "1.78.0";
     packageFun = import ./Cargo.nix;
+    target = "x86_64-unknown-linux-musl";
 #    localPatterns = [
 #      ''^(src|tests|templates||include|)(/.*)?''
 #      ''[^/]*\.(rs|toml|sql|h)$''
