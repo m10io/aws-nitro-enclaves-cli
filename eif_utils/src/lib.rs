@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![deny(warnings)]
-use aws_nitro_enclaves_cose::{header_map::HeaderMap, CoseSign1};
+use aws_nitro_enclaves_cose::{sign::HeaderMap, CoseSign1};
 use crc::{crc32, Hasher32};
 use eif_defs::eif_hasher::EifHasher;
 use eif_defs::{
