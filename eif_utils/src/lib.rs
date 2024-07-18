@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![deny(warnings)]
-use aws_nitro_enclaves_cose::{sign::HeaderMap, COSESign1};
+use aws_nitro_enclaves_cose::{header_map::HeaderMap, CoseSign1};
 use crc::{crc32, Hasher32};
 use eif_defs::eif_hasher::EifHasher;
 use eif_defs::{
@@ -221,7 +221,7 @@ impl<T: Digest + Debug + Write + Clone> EifBuilder<T> {
         let private_key = EcKey::private_key_from_pem(&sign_info.private_key)
             .expect("Could not deserialize the PEM-formatted private key");
 
-        let signature = COSESign1::new(&payload, &HeaderMap::new(), private_key.as_ref())
+        let signature = CoseSign1::new(&payload, &HeaderMap::new(), private_key.as_ref())
             .unwrap()
             .as_bytes(false)
             .unwrap();
