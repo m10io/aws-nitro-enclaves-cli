@@ -6,7 +6,7 @@
 use chrono::offset::{Local, Utc};
 use chrono::DateTime;
 use flexi_logger::writers::LogWriter;
-use flexi_logger::{DeferredNow, LogTarget, Record};
+use flexi_logger::{DeferredNow, Record};
 use nix::unistd::Uid;
 use std::env;
 use std::fs::{File, OpenOptions, Permissions};
@@ -89,7 +89,7 @@ impl EnclaveProcLogWriter {
     /// Generate a single message string.
     fn create_msg(&self, now: &DateTime<Local>, record: &Record) -> NitroCliResult<String> {
         // UTC timestamp according to RFC 2822
-        let timestamp = DateTime::<Utc>::from_utc(now.naive_utc(), Utc)
+        let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(now.naive_utc(), Utc)
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let logger_id = self.logger_id.lock().map_err(|e| {
             new_nitro_cli_failure!(
@@ -120,7 +120,7 @@ impl LogWriter for EnclaveProcLogWriter {
 
         if let Ok(record_str) = self.create_msg(now.now(), record) {
             if let Ok(mut out_file) = self.out_file.lock() {
-                out_file.deref_mut().write_all(&record_str.as_bytes())?;
+                out_file.deref_mut().write_all(record_str.as_bytes())?;
 
                 return Ok(());
             }
@@ -142,8 +142,7 @@ impl LogWriter for EnclaveProcLogWriter {
         // The log level is either given in RUST_LOG or defaults to a specified value.
         let level = std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_LOG_LEVEL.to_string());
 
-        let level = level.to_lowercase();
-        match level.as_ref() {
+        match level.to_lowercase().as_ref() {
             "info" => log::LevelFilter::Info,
             "debug" => log::LevelFilter::Debug,
             "warn" => log::LevelFilter::Warn,
@@ -226,8 +225,14 @@ pub fn init_logger() -> NitroCliResult<EnclaveProcLogWriter> {
     let log_writer = EnclaveProcLogWriter::new()?;
 
     // Initialize logging with the new log writer.
-    flexi_logger::Logger::with_env_or_str(DEFAULT_LOG_LEVEL)
-        .log_target(LogTarget::Writer(Box::new(log_writer.clone())))
+    flexi_logger::Logger::try_with_env_or_str(DEFAULT_LOG_LEVEL)
+        .map_err(|e| {
+            new_nitro_cli_failure!(
+                &format!("Failed to initialize enclave process logger: {:?}", e),
+                NitroCliErrorEnum::LoggerError
+            )
+        })?
+        .log_to_writer(Box::new(log_writer.clone()))
         .start()
         .map_err(|e| {
             new_nitro_cli_failure!(
@@ -258,7 +263,7 @@ mod tests {
         if let Ok(file0) = file0 {
             let test_file_path = file0.path();
 
-            let f = open_log_file(&test_file_path).unwrap();
+            let f = open_log_file(test_file_path).unwrap();
             let metadata = f.metadata();
             assert!(metadata.is_ok());
 
@@ -295,7 +300,7 @@ mod tests {
             let _ = fs::remove_dir_all(tmp_log_dir);
         } else {
             // Only remove the log file
-            let _ = fs::remove_file(&format!("{}/{}", tmp_log_dir, &LOG_FILE_NAME));
+            let _ = fs::remove_file(format!("{}/{}", tmp_log_dir, &LOG_FILE_NAME));
         }
 
         // Reset old environment variable value if necessary
@@ -319,19 +324,19 @@ mod tests {
         let _ = fs::create_dir(tmp_log_dir);
 
         let log_writer = EnclaveProcLogWriter::new().unwrap();
-        let _ = log_writer.update_logger_id("new-logger-id").unwrap();
+        log_writer.update_logger_id("new-logger-id").unwrap();
         let lock_result = log_writer.logger_id.lock();
 
         assert!(lock_result.unwrap().eq("new-logger-id"));
 
-        let _ = log_writer.update_logger_id("").unwrap();
+        log_writer.update_logger_id("").unwrap();
 
         if !path_existed {
             // Remove whole `tmp_log_dir` if necessary
             let _ = fs::remove_dir_all(tmp_log_dir);
         } else {
             // Only remove the log file
-            let _ = fs::remove_file(&format!("{}/{}", tmp_log_dir, &LOG_FILE_NAME));
+            let _ = fs::remove_file(format!("{}/{}", tmp_log_dir, &LOG_FILE_NAME));
         }
 
         // Reset old environment variable value if necessary

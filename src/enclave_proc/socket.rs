@@ -63,7 +63,7 @@ impl EnclaveProcSock {
 
     /// Get the path to the managed Unix socket.
     pub fn get_path(&self) -> &Path {
-        &self.socket_path.as_path()
+        self.socket_path.as_path()
     }
 
     /// Set the path of the managed Unix socket.
@@ -75,7 +75,7 @@ impl EnclaveProcSock {
     pub fn start_monitoring(&mut self, exit_on_delete: bool) -> NitroCliResult<()> {
         let path_clone = self.socket_path.clone();
         let requested_remove_clone = self.requested_remove.clone();
-        let mut socket_inotify = Inotify::init().map_err(|e| {
+        let socket_inotify = Inotify::init().map_err(|e| {
             new_nitro_cli_failure!(
                 &format!("Failed to initialize socket notifications: {:?}", e),
                 NitroCliErrorEnum::InotifyError
@@ -86,7 +86,8 @@ impl EnclaveProcSock {
         // - IN_DELETE_SELF: triggered when the socket file inode gets removed.
         // - IN_ATTRIB: triggered when the reference count of the file inode changes.
         socket_inotify
-            .add_watch(
+            .watches()
+            .add(
                 self.socket_path.as_path(),
                 WatchMask::ATTRIB | WatchMask::DELETE_SELF,
             )
@@ -240,7 +241,7 @@ mod tests {
     /// expected ones.
     #[test]
     fn test_enclaveprocsock_init() {
-        let socket = EnclaveProcSock::new(&DUMMY_ENCLAVE_ID.to_string());
+        let socket = EnclaveProcSock::new(DUMMY_ENCLAVE_ID);
 
         assert!(socket.is_ok());
 
@@ -260,7 +261,7 @@ mod tests {
     /// trigger a `socket.requested_remove` change.
     #[test]
     fn test_start_monitoring() {
-        let socket = EnclaveProcSock::new(&DUMMY_ENCLAVE_ID.to_string());
+        let socket = EnclaveProcSock::new(DUMMY_ENCLAVE_ID);
 
         assert!(socket.is_ok());
 
@@ -289,7 +290,7 @@ mod tests {
     /// that the listener thread joins.
     #[test]
     fn test_close() {
-        let socket = EnclaveProcSock::new(&DUMMY_ENCLAVE_ID.to_string());
+        let socket = EnclaveProcSock::new(DUMMY_ENCLAVE_ID);
 
         assert!(socket.is_ok());
 

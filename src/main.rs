@@ -13,7 +13,8 @@ use log::info;
 use std::os::unix::net::UnixStream;
 
 use nitro_cli::common::commands_parser::{
-    BuildEnclavesArgs, ConsoleArgs, EmptyArgs, ExplainArgs, RunEnclavesArgs, TerminateEnclavesArgs,
+    BuildEnclavesArgs, ConsoleArgs, DescribeEnclavesArgs, EmptyArgs, ExplainArgs, PcrArgs,
+    RunEnclavesArgs, TerminateEnclavesArgs,
 };
 use nitro_cli::common::document_errors::explain_error;
 use nitro_cli::common::json_output::{EnclaveDescribeInfo, EnclaveRunInfo, EnclaveTerminateInfo};
@@ -27,29 +28,24 @@ use nitro_cli::enclave_proc_comm::{
     enclave_proc_get_flags, enclave_proc_spawn, enclave_process_handle_all_replies,
 };
 use nitro_cli::{
-    build_enclaves, console_enclaves, create_app, new_nitro_cli_failure, terminate_all_enclaves,
+    build_enclaves, console_enclaves, create_app, describe_eif, get_all_enclave_names,
+    get_file_pcr, new_enclave_name, new_nitro_cli_failure, terminate_all_enclaves,
 };
 
 const RUN_ENCLAVE_STR: &str = "Run Enclave";
 const DESCRIBE_ENCLAVE_STR: &str = "Describe Enclave";
+const DESCRIBE_EIF_STR: &str = "Describe EIF";
 const TERMINATE_ENCLAVE_STR: &str = "Terminate Enclave";
 const TERMINATE_ALL_ENCLAVES_STR: &str = "Terminate All Enclaves";
 const BUILD_ENCLAVE_STR: &str = "Build Enclave";
 const ENCLAVE_CONSOLE_STR: &str = "Enclave Console";
 const EXPLAIN_ERR_STR: &str = "Explain Error";
+const NEW_NAME_STR: &str = "New Enclave Name";
+const FILE_PCR_STR: &str = "File PCR";
 
 /// *Nitro CLI* application entry point.
 fn main() {
-    // Custom version (possibly including build commit).
-    let commit_id = env!("COMMIT_ID");
-    let version_str: String = match commit_id.len() {
-        0 => env!("CARGO_PKG_VERSION").to_string(),
-        _ => format!(
-            "{} (build commit: {})",
-            env!("CARGO_PKG_VERSION"),
-            commit_id
-        ),
-    };
+    let version_str: String = env!("CARGO_PKG_VERSION").to_string();
 
     // Command-line specification for the Nitro CLI.
     let mut app = create_app!();
@@ -67,8 +63,8 @@ fn main() {
     info!("Start Nitro CLI");
 
     match args.subcommand() {
-        ("run-enclave", Some(args)) => {
-            let run_args = RunEnclavesArgs::new_with(args)
+        Some(("run-enclave", args)) => {
+            let mut run_args = RunEnclavesArgs::new_with(args)
                 .map_err(|err| {
                     err.add_subaction("Failed to construct RunEnclave arguments".to_string())
                         .set_action(RUN_ENCLAVE_STR.to_string())
@@ -80,6 +76,21 @@ fn main() {
                         .set_action(RUN_ENCLAVE_STR.to_string())
                 })
                 .ok_or_exit_with_errno(None);
+
+            let names = get_all_enclave_names()
+                .map_err(|e| {
+                    e.add_subaction("Failed to handle all enclave process replies".to_string())
+                        .set_action("Get Enclaves Name".to_string())
+                })
+                .ok_or_exit_with_errno(None);
+            run_args.enclave_name = Some(
+                new_enclave_name(run_args.clone(), names)
+                    .map_err(|err| {
+                        err.add_subaction("Failed to assign a new enclave name".to_string())
+                            .set_action(NEW_NAME_STR.to_string())
+                    })
+                    .ok_or_exit_with_errno(None),
+            );
 
             enclave_proc_command_send_single(
                 EnclaveProcessCommandType::Run,
@@ -94,14 +105,37 @@ fn main() {
 
             info!("Sent command: Run");
             replies.push(comm);
-            enclave_process_handle_all_replies::<EnclaveRunInfo>(&mut replies, 0, false, vec![0])
-                .map_err(|e| {
-                    e.add_subaction("Failed to handle all enclave process replies".to_string())
-                        .set_action(RUN_ENCLAVE_STR.to_string())
+            let run_info = enclave_process_handle_all_replies::<EnclaveRunInfo>(
+                &mut replies,
+                0,
+                false,
+                vec![0],
+            )
+            .map_err(|e| {
+                e.add_subaction("Failed to handle all enclave process replies".to_string())
+                    .set_action(RUN_ENCLAVE_STR.to_string())
+            })
+            .ok_or_exit_with_errno(None);
+            let enclave_cid = run_info
+                .first()
+                .map(|run_info| run_info.enclave_cid)
+                .ok_or_else(|| {
+                    new_nitro_cli_failure!(
+                        "Enclave CID was not reported",
+                        NitroCliErrorEnum::EnclaveConsoleConnectionFailure
+                    )
                 })
                 .ok_or_exit_with_errno(None);
+            if run_args.attach_console {
+                console_enclaves(enclave_cid, None)
+                    .map_err(|e| {
+                        e.add_subaction("Failed to connect to enclave console".to_string())
+                            .set_action(ENCLAVE_CONSOLE_STR.to_string())
+                    })
+                    .ok_or_exit_with_errno(None);
+            }
         }
-        ("terminate-enclave", Some(args)) => {
+        Some(("terminate-enclave", args)) => {
             if args.is_present("all") {
                 terminate_all_enclaves()
                     .map_err(|e| {
@@ -151,10 +185,11 @@ fn main() {
                 .ok_or_exit_with_errno(None);
             }
         }
-        ("describe-enclaves", _) => {
-            let (comms, comm_errors) = enclave_proc_command_send_all::<EmptyArgs>(
+        Some(("describe-enclaves", args)) => {
+            let describe_args = DescribeEnclavesArgs::new_with(args);
+            let (comms, comm_errors) = enclave_proc_command_send_all::<DescribeEnclavesArgs>(
                 EnclaveProcessCommandType::Describe,
-                None,
+                Some(&describe_args),
             )
             .map_err(|e| {
                 e.add_subaction(
@@ -178,7 +213,7 @@ fn main() {
             })
             .ok_or_exit_with_errno(None);
         }
-        ("build-enclave", Some(args)) => {
+        Some(("build-enclave", args)) => {
             let build_args = BuildEnclavesArgs::new_with(args)
                 .map_err(|e| {
                     e.add_subaction("Failed to construct BuildEnclave arguments".to_string())
@@ -192,7 +227,19 @@ fn main() {
                 })
                 .ok_or_exit_with_errno(None);
         }
-        ("console", Some(args)) => {
+        Some(("describe-eif", args)) => {
+            let eif_path = args
+                .value_of("eif-path")
+                .map(|val| val.to_string())
+                .unwrap();
+            describe_eif(eif_path)
+                .map_err(|e| {
+                    e.add_subaction("Failed to describe EIF".to_string())
+                        .set_action(DESCRIBE_EIF_STR.to_string())
+                })
+                .ok_or_exit_with_errno(None);
+        }
+        Some(("console", args)) => {
             let console_args = ConsoleArgs::new_with(args)
                 .map_err(|e| {
                     e.add_subaction("Failed to construct Console arguments".to_string())
@@ -222,14 +269,30 @@ fn main() {
                 })
                 .ok_or_exit_with_errno(None);
             }
-            console_enclaves(enclave_cid)
+
+            console_enclaves(enclave_cid, console_args.disconnect_timeout_sec)
                 .map_err(|e| {
                     e.add_subaction("Failed to connect to enclave console".to_string())
                         .set_action(ENCLAVE_CONSOLE_STR.to_string())
                 })
                 .ok_or_exit_with_errno(None);
         }
-        ("explain", Some(args)) => {
+        Some(("pcr", args)) => {
+            let pcr_args = PcrArgs::new_with(args)
+                .map_err(|e| {
+                    e.add_subaction("Failed to construct PCR arguments".to_string())
+                        .set_action(FILE_PCR_STR.to_string())
+                })
+                .ok_or_exit_with_errno(None);
+
+            get_file_pcr(pcr_args.path, pcr_args.pcr_type)
+                .map_err(|e| {
+                    e.add_subaction("Failed to get the PCR hash of the file contents".to_string())
+                        .set_action(FILE_PCR_STR.to_string())
+                })
+                .ok_or_exit_with_errno(None);
+        }
+        Some(("explain", args)) => {
             let explain_args = ExplainArgs::new_with(args)
                 .map_err(|e| {
                     e.add_subaction("Failed to construct Explain arguments".to_string())
@@ -238,6 +301,6 @@ fn main() {
                 .ok_or_exit_with_errno(None);
             explain_error(explain_args.error_code_str);
         }
-        (&_, _) => {}
+        Some((&_, _)) | None => (),
     }
 }

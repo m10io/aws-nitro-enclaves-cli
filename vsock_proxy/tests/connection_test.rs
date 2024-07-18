@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #![deny(warnings)]
 
-use nix::sys::socket::SockAddr;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::{IpAddr, Ipv4Addr};
@@ -10,12 +9,12 @@ use std::str;
 use std::sync::mpsc;
 use std::thread;
 use tempfile::NamedTempFile;
-use vsock::VsockStream;
+use vsock::{VsockAddr, VsockStream};
 
-use vsock_proxy::starter::Proxy;
+use vsock_proxy::{proxy::Proxy, IpAddrType};
 
 fn vsock_connect(port: u32) -> VsockStream {
-    let sockaddr = SockAddr::new_vsock(vsock_proxy::starter::VSOCK_PROXY_CID, port);
+    let sockaddr = VsockAddr::new(vsock_proxy::proxy::VSOCK_PROXY_CID, port);
     VsockStream::connect(&sockaddr).expect("Could not connect")
 }
 
@@ -23,21 +22,19 @@ fn vsock_connect(port: u32) -> VsockStream {
 #[test]
 fn test_tcp_connection() {
     // Proxy will translate from port 8000 vsock to localhost port 9000 TCP
-    let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)).to_string();
     let mut file = NamedTempFile::new().unwrap();
     file.write_all(
         b"allowlist:\n\
             - {address: 127.0.0.1, port: 9000}",
     )
     .unwrap();
-    let proxy = Proxy::new(
-        vsock_proxy::starter::VSOCK_PROXY_PORT,
+    let mut proxy = Proxy::new(
+        vsock_proxy::proxy::VSOCK_PROXY_PORT,
         addr,
         9000,
         2,
-        file.path().to_str(),
-        false,
-        false,
+        IpAddrType::IPAddrMixed,
     )
     .unwrap();
 
@@ -74,7 +71,7 @@ fn test_tcp_connection() {
 
     // Start client that connects to proxy on port 8000 vsock
     let client_handle = thread::spawn(move || {
-        let mut stream = vsock_connect(vsock_proxy::starter::VSOCK_PROXY_PORT);
+        let mut stream = vsock_connect(vsock_proxy::proxy::VSOCK_PROXY_PORT);
 
         // Write request
         stream.write_all(b"client2server").expect("client write");

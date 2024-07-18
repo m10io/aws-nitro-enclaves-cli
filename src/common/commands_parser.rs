@@ -9,9 +9,12 @@ use libc::VMADDR_CID_HOST;
 use libc::VMADDR_CID_LOCAL;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::str::FromStr;
 
 use crate::common::{NitroCliErrorEnum, NitroCliFailure, NitroCliResult, VMADDR_CID_PARENT};
+use crate::get_id_by_name;
 use crate::new_nitro_cli_failure;
+use crate::utils::PcrType;
 
 /// The arguments used by the `run-enclave` command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,9 +28,15 @@ pub struct RunEnclavesArgs {
     /// An optional list of CPU IDs that will be given to the enclave.
     pub cpu_ids: Option<Vec<u32>>,
     /// A flag indicating if the enclave will be started in debug mode.
-    pub debug_mode: Option<bool>,
+    #[serde(default)]
+    pub debug_mode: bool,
+    /// Attach to the console immediately if using debug mode.
+    #[serde(default)]
+    pub attach_console: bool,
     /// The number of CPUs that the enclave will receive.
     pub cpu_count: Option<u32>,
+    /// Enclave name set by the user.
+    pub enclave_name: Option<String>,
 }
 
 impl RunEnclavesArgs {
@@ -42,13 +51,13 @@ impl RunEnclavesArgs {
                 .add_info(vec![config_file, "Open"])
             })?;
 
-            let json: RunEnclavesArgs = serde_json::from_reader(file).map_err(|err| {
+            let mut json: RunEnclavesArgs = serde_json::from_reader(file).map_err(|err| {
                 new_nitro_cli_failure!(
                     &format!("Invalid JSON format for config file: {:?}", err),
                     NitroCliErrorEnum::SerdeError
                 )
             })?;
-            if json.cpu_count == None && json.cpu_ids == None {
+            if json.cpu_count.is_none() && json.cpu_ids.is_none() {
                 return Err(new_nitro_cli_failure!(
                     "Missing both `cpu-count` and `cpu-ids`",
                     NitroCliErrorEnum::MissingArgument
@@ -60,6 +69,9 @@ impl RunEnclavesArgs {
                     NitroCliErrorEnum::ConflictingArgument
                 ));
             }
+
+            // attach_console implies debug_mode
+            json.debug_mode = json.debug_mode || json.attach_console;
 
             Ok(json)
         } else {
@@ -75,6 +87,9 @@ impl RunEnclavesArgs {
                 cpu_ids: parse_cpu_ids(args)
                     .map_err(|err| err.add_subaction("Parse CPU IDs".to_string()))?,
                 debug_mode: debug_mode(args),
+                attach_console: attach_console(args),
+                enclave_name: parse_enclave_name(args)
+                    .map_err(|err| err.add_subaction("Parse enclave name".to_string()))?,
             })
         }
     }
@@ -97,6 +112,12 @@ pub struct BuildEnclavesArgs {
     pub cmd_params: Vec<String>,
     /// The env bindings for use inside of the enclave
     pub env_bindings: Vec<String>,
+    /// The name of the enclave image.
+    pub img_name: Option<String>,
+    /// The version of the enclave image.
+    pub img_version: Option<String>,
+    /// The path to custom metadata JSON file
+    pub metadata: Option<String>,
 }
 
 impl BuildEnclavesArgs {
@@ -146,6 +167,9 @@ impl BuildEnclavesArgs {
             private_key,
             cmd_params,
             env_bindings,
+            img_name: parse_image_name(args),
+            img_version: parse_image_version(args),
+            metadata: parse_metadata(args),
         })
     }
 }
@@ -160,10 +184,19 @@ pub struct TerminateEnclavesArgs {
 impl TerminateEnclavesArgs {
     /// Construct a new `TerminateEnclavesArgs` instance from the given command-line arguments.
     pub fn new_with(args: &ArgMatches) -> NitroCliResult<Self> {
-        Ok(TerminateEnclavesArgs {
-            enclave_id: parse_enclave_id(args)
-                .map_err(|e| e.add_subaction("Parse enclave ID".to_string()))?,
-        })
+        // If a name is given, find the corresponding EnclaveID
+        match parse_enclave_name(args)
+            .map_err(|e| e.add_subaction("Parse Enclave Name".to_string()))?
+        {
+            Some(name) => Ok(TerminateEnclavesArgs {
+                enclave_id: get_id_by_name(name)
+                    .map_err(|e| e.add_subaction("Get ID by Name".to_string()))?,
+            }),
+            None => Ok(TerminateEnclavesArgs {
+                enclave_id: parse_enclave_id(args)
+                    .map_err(|e| e.add_subaction("Parse enclave ID".to_string()))?,
+            }),
+        }
     }
 }
 
@@ -172,21 +205,51 @@ impl TerminateEnclavesArgs {
 pub struct ConsoleArgs {
     /// The ID of the enclave whose console is to be shown.
     pub enclave_id: String,
+    /// The time in seconds after the console disconnects from the enclave.
+    pub disconnect_timeout_sec: Option<u64>,
 }
 
 impl ConsoleArgs {
     /// Construct a new `ConsoleArgs` instance from the given command-line arguments.
     pub fn new_with(args: &ArgMatches) -> NitroCliResult<Self> {
-        Ok(ConsoleArgs {
-            enclave_id: parse_enclave_id(args)
+        // If a name is given, find the corresponding EnclaveID
+        let enclave_id = match parse_enclave_name(args)
+            .map_err(|e| e.add_subaction("Parse Enclave Name".to_string()))?
+        {
+            Some(name) => {
+                get_id_by_name(name).map_err(|e| e.add_subaction("Get ID by Name".to_string()))?
+            }
+            None => parse_enclave_id(args)
                 .map_err(|e| e.add_subaction("Parse enclave ID".to_string()))?,
+        };
+
+        Ok(ConsoleArgs {
+            enclave_id,
+            disconnect_timeout_sec: parse_disconnect_timeout(args)
+                .map_err(|e| e.add_subaction("Parse disconnect timeout".to_string()))?,
         })
     }
 }
 
-/// The arguments used by the `describe-enclaves` command.
+/// Empty set of arguments.
 #[derive(Serialize, Deserialize)]
 pub struct EmptyArgs {}
+
+/// The arguments used by `describe-enclaves` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DescribeEnclavesArgs {
+    /// True if metadata is requested.
+    pub metadata: bool,
+}
+
+impl DescribeEnclavesArgs {
+    /// Construct a new `DescribeEnclavesArgs` instance from the given command-line arguments.
+    pub fn new_with(args: &ArgMatches) -> Self {
+        DescribeEnclavesArgs {
+            metadata: args.is_present("metadata"),
+        }
+    }
+}
 
 /// The arguments used by the `explain` command.
 #[derive(Debug, Clone)]
@@ -205,21 +268,106 @@ impl ExplainArgs {
     }
 }
 
+/// The arguments used by `pcr` command
+pub struct PcrArgs {
+    /// Path to the file needed for hashing
+    pub path: String,
+    /// The type of file we need to hash
+    pub pcr_type: PcrType,
+}
+
+impl PcrArgs {
+    /// Construct a new `PcrArgs` instance from the given command-line arguments.
+    pub fn new_with(args: &ArgMatches) -> NitroCliResult<Self> {
+        let (val_name, pcr_type) = match args.is_present("signing-certificate") {
+            true => ("signing-certificate", PcrType::SigningCertificate),
+            false => ("input", PcrType::DefaultType),
+        };
+        let path = parse_file_path(args, val_name)
+            .map_err(|e| e.add_subaction("Parse PCR file".to_string()))?;
+        Ok(Self { path, pcr_type })
+    }
+}
+
+/// Parse file path to hash from the command-line arguments.
+fn parse_file_path(args: &ArgMatches, val_name: &str) -> NitroCliResult<String> {
+    let path = args.value_of(val_name).ok_or_else(|| {
+        new_nitro_cli_failure!(
+            "`input` or `signing-certificate` argument not found",
+            NitroCliErrorEnum::MissingArgument
+        )
+    })?;
+    Ok(path.to_string())
+}
+
+#[derive(Debug)]
+enum MemoryUnit {
+    Mebibytes,
+    Gibibytes,
+    Tebibytes,
+}
+
+#[derive(Debug)]
+struct UnknownMemoryUnitErr;
+
+impl MemoryUnit {
+    fn to_mebibytes(&self) -> u64 {
+        match self {
+            MemoryUnit::Mebibytes => 1,
+            MemoryUnit::Gibibytes => 1024,
+            MemoryUnit::Tebibytes => 1024 * 1024,
+        }
+    }
+}
+
+impl FromStr for MemoryUnit {
+    type Err = UnknownMemoryUnitErr;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "M" | "m" | "" => Ok(MemoryUnit::Mebibytes),
+            "G" | "g" => Ok(MemoryUnit::Gibibytes),
+            "T" | "t" => Ok(MemoryUnit::Tebibytes),
+            _ => Err(UnknownMemoryUnitErr),
+        }
+    }
+}
+
 /// Parse the requested amount of enclave memory from the command-line arguments.
-fn parse_memory(args: &ArgMatches) -> NitroCliResult<u64> {
+/// It can be just a number like 123, or it can end in a size indicator like 100M or 10G.
+/// If the size indicator is missing, it defaults to M.
+/// If the size indicator is not M, G or T, it returns an error.
+///
+/// # Arguments
+/// * `args` - The command-line arguments.
+pub fn parse_memory(args: &ArgMatches) -> NitroCliResult<u64> {
     let memory = args.value_of("memory").ok_or_else(|| {
         new_nitro_cli_failure!(
             "`memory` argument not found",
             NitroCliErrorEnum::MissingArgument
         )
     })?;
-    memory.parse().map_err(|_| {
+
+    let (num_str, size_str) = match memory.find(|c: char| !c.is_numeric()) {
+        Some(index) => memory.split_at(index),
+        None => (memory, ""),
+    };
+    let num = num_str.parse::<u64>().map_err(|_| {
         new_nitro_cli_failure!(
-            "`memory` is not a number",
+            "`memory` argument does not contain a number",
             NitroCliErrorEnum::InvalidArgument
         )
         .add_info(vec!["memory", memory])
-    })
+    })?;
+
+    let unit = size_str.parse::<MemoryUnit>().map_err(|_| {
+        new_nitro_cli_failure!(
+            "`memory` argument does not contain a valid size indicator",
+            NitroCliErrorEnum::InvalidArgument
+        )
+        .add_info(vec!["memory", memory])
+    })?;
+    Ok(num * unit.to_mebibytes())
 }
 
 /// Parse the Docker tag from the command-line arguments.
@@ -264,7 +412,7 @@ fn parse_enclave_cid(args: &ArgMatches) -> NitroCliResult<Option<u64>> {
             ));
         }
 
-        if enclave_cid == u32::max_value() as u64 {
+        if enclave_cid == u32::MAX as u64 {
             return Err(new_nitro_cli_failure!(
                 &format!(
                     "CID {} is a well-known CID, not to be used for enclaves",
@@ -286,7 +434,7 @@ fn parse_enclave_cid(args: &ArgMatches) -> NitroCliResult<Option<u64>> {
         }
 
         // 64-bit CIDs are not yet supported for the vsock device.
-        if enclave_cid > u32::max_value() as u64 {
+        if enclave_cid > u32::MAX as u64 {
             return Err(new_nitro_cli_failure!(
                 &format!(
                     "CID {} is higher than the maximum supported (u32 max) for a vsock device",
@@ -324,6 +472,24 @@ fn parse_enclave_id(args: &ArgMatches) -> NitroCliResult<String> {
         )
     })?;
     Ok(enclave_id.to_string())
+}
+
+/// Parse the disconnect timeout from the command-line arguments.
+fn parse_disconnect_timeout(args: &ArgMatches) -> NitroCliResult<Option<u64>> {
+    let disconnect_timeout = match args.value_of("disconnect-timeout") {
+        Some(arg) => Some(arg.parse::<u64>().map_err(|_| {
+            new_nitro_cli_failure!(
+                "`disconnect-timeout` argument can't be parsed as a number",
+                NitroCliErrorEnum::InvalidArgument
+            )
+            .add_info(vec![
+                "disconnect-timeout",
+                args.value_of("disconnect-timeout").unwrap(),
+            ])
+        })?),
+        None => None,
+    };
+    Ok(disconnect_timeout)
 }
 
 /// Parse the list of requested CPU IDs from the command-line arguments.
@@ -370,13 +536,18 @@ fn parse_output(args: &ArgMatches) -> Option<String> {
 }
 
 /// Parse the debug-mode flag from the command-line arguments.
-fn debug_mode(args: &ArgMatches) -> Option<bool> {
-    let val = args.is_present("debug-mode");
-    if val {
-        Some(val)
-    } else {
-        None
-    }
+fn debug_mode(args: &ArgMatches) -> bool {
+    args.is_present("debug-mode") || args.is_present("attach-console")
+}
+
+/// Parse the attach-console flag from the command-line arguments.
+fn attach_console(args: &ArgMatches) -> bool {
+    args.is_present("attach-console")
+}
+
+/// Parse the enclave name from the command-line arguments.
+fn parse_enclave_name(args: &ArgMatches) -> NitroCliResult<Option<String>> {
+    Ok(args.value_of("enclave-name").map(|e| e.to_string()))
 }
 
 fn parse_signing_certificate(args: &ArgMatches) -> Option<String> {
@@ -386,6 +557,18 @@ fn parse_signing_certificate(args: &ArgMatches) -> Option<String> {
 
 fn parse_private_key(args: &ArgMatches) -> Option<String> {
     args.value_of("private-key").map(|val| val.to_string())
+}
+
+fn parse_image_name(args: &ArgMatches) -> Option<String> {
+    args.value_of("image_name").map(|val| val.to_string())
+}
+
+fn parse_image_version(args: &ArgMatches) -> Option<String> {
+    args.value_of("image_version").map(|val| val.to_string())
+}
+
+fn parse_metadata(args: &ArgMatches) -> Option<String> {
+    args.value_of("metadata").map(|val| val.to_string())
 }
 
 fn parse_cmd_params(args: &ArgMatches) -> Vec<String> {
@@ -457,6 +640,102 @@ mod tests {
             let err_str = construct_error_message(&err_info);
             assert!(err_str.contains("Invalid argument provided"))
         }
+
+        let app = create_app!();
+        let args = vec![
+            "nitro-cli",
+            "run-enclave",
+            "--memory",
+            "256",
+            "--cpu-count",
+            "2",
+            "--eif-path",
+            "non_existing_eif.eif",
+        ];
+
+        let matches = app.get_matches_from_safe(args);
+        assert!(matches.is_ok());
+
+        let result = parse_memory(
+            matches
+                .as_ref()
+                .unwrap()
+                .subcommand_matches("run-enclave")
+                .unwrap(),
+        );
+        assert_eq!(result, Ok(256));
+
+        let app = create_app!();
+        let args = vec![
+            "nitro-cli",
+            "run-enclave",
+            "--memory",
+            "100M",
+            "--cpu-count",
+            "2",
+            "--eif-path",
+            "non_existing_eif.eif",
+        ];
+
+        let matches = app.get_matches_from_safe(args);
+        assert!(matches.is_ok());
+
+        let result = parse_memory(
+            matches
+                .as_ref()
+                .unwrap()
+                .subcommand_matches("run-enclave")
+                .unwrap(),
+        );
+        assert_eq!(result, Ok(100));
+
+        let app = create_app!();
+        let args = vec![
+            "nitro-cli",
+            "run-enclave",
+            "--memory",
+            "10G",
+            "--cpu-count",
+            "2",
+            "--eif-path",
+            "non_existing_eif.eif",
+        ];
+
+        let matches = app.get_matches_from_safe(args);
+        assert!(matches.is_ok());
+
+        let result = parse_memory(
+            matches
+                .as_ref()
+                .unwrap()
+                .subcommand_matches("run-enclave")
+                .unwrap(),
+        );
+        assert_eq!(result, Ok(10_240));
+
+        let app = create_app!();
+        let args = vec![
+            "nitro-cli",
+            "run-enclave",
+            "--memory",
+            "2T",
+            "--cpu-count",
+            "2",
+            "--eif-path",
+            "non_existing_eif.eif",
+        ];
+
+        let matches = app.get_matches_from_safe(args);
+        assert!(matches.is_ok());
+
+        let result = parse_memory(
+            matches
+                .as_ref()
+                .unwrap()
+                .subcommand_matches("run-enclave")
+                .unwrap(),
+        );
+        assert_eq!(result, Ok(2 * 1024 * 1024));
     }
 
     #[test]
@@ -987,8 +1266,7 @@ mod tests {
                 .subcommand_matches("run-enclave")
                 .unwrap(),
         );
-        assert!(result.is_some());
-        assert!(result.unwrap());
+        assert!(result);
     }
 
     #[test]
@@ -1014,7 +1292,35 @@ mod tests {
                 .subcommand_matches("run-enclave")
                 .unwrap(),
         );
-        assert!(result.is_none());
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_attach_console_supplied() {
+        let app = create_app!();
+        let args = vec![
+            "nitro-cli",
+            "run-enclave",
+            "--attach-console",
+            "--memory",
+            "64",
+            "--cpu-count",
+            "2",
+            "--eif-path",
+            "non_existing_eif.eif",
+        ];
+        let matches = app.get_matches_from_safe(args);
+        assert!(matches.is_ok());
+
+        let matches = matches
+            .as_ref()
+            .unwrap()
+            .subcommand_matches("run-enclave")
+            .unwrap();
+        let attach_console = attach_console(matches);
+        let debug_mode = debug_mode(matches);
+        assert!(attach_console);
+        assert!(debug_mode);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2020-2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 #![deny(missing_docs)]
 #![deny(warnings)]
@@ -20,6 +20,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::{Read, Write};
+
+#[cfg(test)]
+use std::os::raw::c_char;
+
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
@@ -52,8 +56,9 @@ const SOCKETS_DIR_PATH: &str = "/run/nitro_enclaves";
 const BACKTRACE_VAR: &str = "BACKTRACE";
 
 /// All possible errors which may occur.
-#[derive(Debug, Clone, Copy, Hash, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Hash, PartialEq)]
 pub enum NitroCliErrorEnum {
+    #[default]
     /// Unspecified error (should avoid using it thoughout the code).
     UnspecifiedError = 0,
     /// Error for handling missing arguments.
@@ -168,18 +173,18 @@ pub enum NitroCliErrorEnum {
     SignalUnmaskingError,
     /// General error for handling logger-related errors.
     LoggerError,
-}
-
-impl Default for NitroCliErrorEnum {
-    fn default() -> NitroCliErrorEnum {
-        NitroCliErrorEnum::UnspecifiedError
-    }
+    /// Hasher operation error
+    HasherError,
+    /// Enclave naming error
+    EnclaveNamingError,
+    /// Signature checker error
+    EIFSignatureCheckerError,
 }
 
 impl Eq for NitroCliErrorEnum {}
 
 /// The type of commands that can be sent to an enclave process.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EnclaveProcessCommandType {
     /// Launch (run) an enclave (sent by the CLI).
     Run = 0,
@@ -193,6 +198,10 @@ pub enum EnclaveProcessCommandType {
     GetEnclaveCID,
     /// Request an enclave's flags (sent by the CLI).
     GetEnclaveFlags,
+    /// Request an enclave's name (sent by the CLI).
+    GetEnclaveName,
+    /// Request the ID of an enclave only if the name matches (sent by the CLI).
+    GetIDbyName,
     /// Notify the socket connection listener to shut down (sent by the enclave process to itself).
     ConnectionListenerStop,
     /// Do not execute a command due to insufficient privileges (sent by the CLI, modified by the enclave process).
@@ -211,7 +220,7 @@ pub enum EnclaveProcessReply {
 }
 
 /// Struct that is passed along the backtrace and accumulates error messages.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct NitroCliFailure {
     /// Main action which was attempted and failed.
     pub action: String,
@@ -318,7 +327,7 @@ fn log_backtrace(backtrace: String) -> Result<String, &'static str> {
         return Err("Could not create backtrace log file");
     }
 
-    let write_result = log_file.unwrap().write_all(&backtrace.as_bytes());
+    let write_result = log_file.unwrap().write_all(backtrace.as_bytes());
     if write_result.is_err() {
         return Err("Could not write to backtrace log file");
     }
@@ -341,7 +350,7 @@ pub fn construct_error_message(failure: &NitroCliFailure) -> String {
     let help_link: String = document_errors::construct_help_link(
         (*ERROR_CODES.get(&failure.error_code).unwrap_or(&"E00")).to_string(),
     );
-    let backtrace: String = document_errors::construct_backtrace(&failure);
+    let backtrace: String = document_errors::construct_backtrace(failure);
 
     // Write backtrace to a log file.
     let log_path = log_backtrace(backtrace.clone());
@@ -558,9 +567,9 @@ mod tests {
 
     const TMP_DIR_STR: &str = "./tmp_sock_dir";
 
-    fn unset_envvar(varname: &String) {
-        let _ = unsafe {
-            libc::unsetenv(varname.as_ptr() as *const i8);
+    fn unset_envvar(varname: &str) {
+        unsafe {
+            libc::unsetenv(varname.as_ptr() as *const c_char);
         };
     }
 

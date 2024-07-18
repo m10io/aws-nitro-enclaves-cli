@@ -35,7 +35,7 @@ FLAGS:
 OPTIONS:
         --config <config_file>     YAML file containing the services that
                                    can be forwarded.
-                                    [default: /etc/vsock_proxy/config.yaml]
+                                    [default: /etc/nitro_enclaves/vsock-proxy.yaml]
     -w, --num_workers <workers>    Set the maximum number of simultaneous
                                    connections supported. [default: 4]
 
@@ -76,7 +76,7 @@ from a domain name); this is mutually exclusive with the `--ipv4` flag
 
 * `--config <config_file`  
 -> to limit the services that the vsock proxy can forward to, we use a configuration file that
-contains an allowlist of accessible services; the default location of this file is `/etc/vsock_proxy/config.yaml`;
+contains an allowlist of accessible services; the default location of this file is `/etc/nitro_enclaves/vsock-proxy.yaml`;
 we specify the format of this file in a later section
 
 * `-w, --num_workers <workers>`  
@@ -89,14 +89,21 @@ is 4
 The configuration file is in YAML format. It should have a key, `allowlist`, and a corresponding list
 of accepted endpoints.  
 We define an accepted endpoint by two keys: `address` and `port`, and their corresponding values.  
-A configuration file example can be found in `configs/config.yaml`.
+A configuration file example can be found in `configs/vsock-proxy.yaml`.
 
 ### Vsock proxy service
 
 After installing the Nitro CLI RPM, the vsock proxy can be run as a service using the following command:  
 ```
-systemctl enable vsock-proxy.service
+systemctl enable nitro-enclaves-vsock-proxy.service
 ```
 The service files can be found in `service` directory. The proxy is ran using the default configuration
-from `/etc/vsock_proxy/config.yaml`, on local port 8000 and the AWS KMS endpoint corresponding to
+from `/etc/nitro_enclaves/vsock-proxy.yaml`, on local port 8000 and the AWS KMS endpoint corresponding to
 the region of the instance.
+
+You can use the following command to check the vsock proxy logs to diagnose connectivity issues.
+```
+journalctl -eu nitro-enclaves-vsock-proxy.service
+```
+To enable more detailed logging output, set the `RUST_LOG` environment variable to the `trace` log level in
+the service file (e.g.`/usr/lib/systemd/system/nitro-enclaves-vsock-proxy.service`).

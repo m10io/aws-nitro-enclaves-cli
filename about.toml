@@ -1,0 +1,15 @@
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "Zlib",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+]
+
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+]

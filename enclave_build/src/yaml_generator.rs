@@ -1,4 +1,4 @@
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2019-2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ struct BootstrapRamfsTemplate {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CustomerRamfsTemplate {
+    prefix: String,
     init: Vec<String>,
     files: (
         DirTemplate,
@@ -39,7 +40,7 @@ struct DirTemplate {
     mode: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum YamlGeneratorError {
     TempfileError,
 }
@@ -102,6 +103,7 @@ impl YamlGenerator {
 
     pub fn get_customer_ramfs(&self) -> Result<NamedTempFile, YamlGeneratorError> {
         let ramfs = CustomerRamfsTemplate {
+            prefix: "rootfs/".to_string(),
             init: vec![self.docker_image.clone()],
             // Each directory must stay under rootfs, as expected by init
             files: (
@@ -193,6 +195,7 @@ mod tests {
              \n  - path: nsm.ko\
              \n    source: path_to_nsm\
              \n    mode: \"0755\"\
+             \n\
              "
         );
 
@@ -203,6 +206,7 @@ mod tests {
         assert_eq!(
             customer_data,
             "---\
+             \nprefix: rootfs/\
              \ninit:\
              \n  - docker_image\
              \nfiles:\
@@ -230,6 +234,7 @@ mod tests {
              \n  - path: env\
              \n    source: path_to_env\
              \n    mode: \"0644\"\
+             \n\
              "
         );
     }

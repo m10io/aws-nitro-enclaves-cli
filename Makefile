@@ -1,4 +1,4 @@
-# Copyright 2019-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright 2019-2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 ##############################
 #                            #
@@ -34,6 +34,8 @@ CC = musl-gcc # Required for openssl-sys cross-build
 else
 TOOLCHAIN_ARCH_TARGET =
 endif
+
+RUST_CRATES_LICENSE_FILE = THIRD_PARTY_LICENSES_RUST_CRATES.html
 
 ifeq ($(TOOLCHAIN_ARCH_TARGET),)
 $(error Unsupported architecture: ${HOST_MACHINE})
@@ -91,7 +93,7 @@ aws-nitro-enclaves-cli.tar.gz:
 sources: aws-nitro-enclaves-cli.tar.gz crates-dependencies
 
 .PHONY: all
-all: build-setup init nitro-cli vsock-proxy
+all: build-setup nitro-cli vsock-proxy
 
 .PHONY: driver-deps
 driver-deps:
@@ -103,16 +105,8 @@ driver-deps:
 	echo "Warning: kernel-header were not installed") \
 	&& echo "Successfully installed the driver deps"
 
-# In order to avoid executing the same rule everytime,
-# the build rules are prefixed by dot and are generating
-# a file with the same name via the touch command. This
-# change is required in order to capture the timestamp
-# of the rule.
-.build-container: tools/Dockerfile1804.${HOST_MACHINE}
-	docker image build -t $(CONTAINER_TAG) -f tools/Dockerfile1804.${HOST_MACHINE} tools/
-	touch $@
-
-build-container: .build-container
+build-container:
+	@docker image build --pull -t $(CONTAINER_TAG) -f tools/Dockerfile tools/
 
 $(OBJ_PATH):
 	$(MKDIR) -p $(OBJ_PATH)
@@ -130,19 +124,14 @@ nitro_enclaves-clean:
 .PHONY: driver-clean
 driver-clean: nitro_enclaves-clean
 
-.PHONY: init
-init: init.c build-setup
-	$(CC) $(C_FLAGS) -o $(OBJ_PATH)/init $< -static -static-libgcc -flto
-	strip --strip-all $(OBJ_PATH)/init
-
 # See .build-container rule for explanation.
-.build-nitro-cli: $(shell find $(BASE_PATH)/src -name "*.rs")
+.build-nitro-cli: $(shell find $(BASE_PATH)/src $(BASE_PATH)/enclave_build/src -name "*.rs")
 	$(DOCKER) run \
 		-v "$$(readlink -f ${BASE_PATH})":/nitro_src \
 		-v "$$(readlink -f ${OBJ_PATH})":/nitro_build \
 		$(CONTAINER_TAG) bin/bash -c \
 			'source /root/.cargo/env && \
-			OPENSSL_STATIC=yes OPENSSL_DIR=/musl_openssl/ CC=${CC} cargo build \
+			OPENSSL_STATIC=yes OPENSSL_DIR=/musl_openssl/ CC=${CC} ARCH=$(TOOLCHAIN_ARCH_TARGET) cargo build \
 				--release \
 				--manifest-path=/nitro_src/Cargo.toml \
 				--target=${CARGO_TARGET} \
@@ -250,7 +239,29 @@ nitro-audit: build-setup build-container
 		-v "$$(readlink -f ${OBJ_PATH})":/nitro_build \
 		$(CONTAINER_TAG) bin/bash -c \
 			'source /root/.cargo/env && \
-			cargo audit -f /nitro_src/Cargo.lock'
+			cargo audit -f /nitro_src/Cargo.lock --ignore RUSTSEC-2020-0159 --ignore RUSTSEC-2020-0071'
+
+nitro-about: build-setup build-container
+	$(DOCKER) run \
+		-v "$$(readlink -f ${BASE_PATH})":/nitro_src \
+		-v "$$(readlink -f ${OBJ_PATH})":/nitro_build \
+		$(CONTAINER_TAG) bin/bash -c \
+			'source /root/.cargo/env && \
+			cargo about generate \
+			--manifest-path=/nitro_src/Cargo.toml \
+			/nitro_src/about.hbs | \
+			diff /nitro_src/$(RUST_CRATES_LICENSE_FILE) -'
+
+.PHONY: update-third-party-licenses-rust-crates-html
+update-third-party-licenses-rust-crates-html: build-setup build-container
+	$(DOCKER) run \
+		-v "$$(readlink -f ${BASE_PATH})":/nitro_src \
+		-v "$$(readlink -f ${OBJ_PATH})":/nitro_build \
+		$(CONTAINER_TAG) bin/bash -c \
+			'source /root/.cargo/env && \
+			cargo about generate \
+			--manifest-path=/nitro_src/Cargo.toml \
+			/nitro_src/about.hbs > /nitro_src/$(RUST_CRATES_LICENSE_FILE)'
 
 # See .build-container rule for explanation.
 .build-vsock-proxy: $(shell find $(BASE_PATH)/vsock_proxy/src -name "*.rs")
@@ -304,7 +315,7 @@ install: install-tools nitro_enclaves
                ${NITRO_CLI_INSTALL_DIR}/lib/modules/$(uname -r)/extra/nitro_enclaves/nitro_enclaves.ko
 	$(INSTALL) -D -m 0644 bootstrap/env.sh ${NITRO_CLI_INSTALL_DIR}${ENV_SETUP_DIR}/nitro-cli-env.sh
 	$(INSTALL) -D -m 0755 bootstrap/nitro-cli-config ${NITRO_CLI_INSTALL_DIR}${ENV_SETUP_DIR}/nitro-cli-config
-	sed -i "2 a NITRO_CLI_INSTALL_DIR=$$(readlink -f ${NITRO_CLI_INSTALL_DIR})" \
+	sed -i "2 a NITRO_CLI_INSTALL_DIR=\$${NITRO_CLI_INSTALL_DIR:-$$(readlink -f ${NITRO_CLI_INSTALL_DIR})}" \
 		${NITRO_CLI_INSTALL_DIR}${ENV_SETUP_DIR}/nitro-cli-env.sh
 	echo "Installation finished"
 	echo "Please run \"source ${NITRO_CLI_INSTALL_DIR}${ENV_SETUP_DIR}/nitro-cli-env.sh\" to setup the environment or add it your local shell configuration"

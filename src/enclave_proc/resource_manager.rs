@@ -2,30 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 #![deny(missing_docs)]
 #![deny(warnings)]
+#![allow(unknown_lints)]
+#![allow(deref_nullptr)]
 
-mod bindings {
-    #![allow(missing_docs)]
-    #![allow(non_camel_case_types)]
-
-    include!(concat!(env!("OUT_DIR"), "/driver_structs.rs"));
-}
-
-use bindings::*;
+use aws_nitro_enclaves_image_format::defs::EifIdentityInfo;
+use driver_bindings::*;
 use eif_loader::{enclave_ready, TIMEOUT_MINUTE_MS};
 use libc::c_int;
 use log::{debug, info};
-use nix::sys::socket::SockAddr;
 use std::collections::BTreeMap;
-use std::convert::{From, Into};
 use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
-use std::io::{Error, SeekFrom};
+use std::io::Error;
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::str;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use vsock::VsockListener;
+use vsock::{VsockAddr, VsockListener};
 
+use crate::common::json_output::EnclaveBuildInfo;
 use crate::common::{construct_error_message, notify_error};
 use crate::common::{
     ExitGracefully, NitroCliErrorEnum, NitroCliFailure, NitroCliResult, ENCLAVE_READY_VSOCK_PORT,
@@ -112,8 +108,9 @@ pub struct MemoryRegion {
 }
 
 /// The state an enclave may be in.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum EnclaveState {
+    #[default]
     /// The enclave is not running (it's either not started or has been terminated).
     Empty,
     /// The enclave is running.
@@ -155,6 +152,10 @@ struct EnclaveHandle {
     eif_file: Option<File>,
     /// The current state the enclave is in.
     state: EnclaveState,
+    /// PCR values.
+    build_info: EnclaveBuildInfo,
+    /// EIF metadata
+    metadata: Option<EifIdentityInfo>,
 }
 
 /// The structure which manages an enclave in a thread-safe manner.
@@ -162,24 +163,25 @@ struct EnclaveHandle {
 pub struct EnclaveManager {
     /// The full ID of the managed enclave.
     pub enclave_id: String,
+    /// Name of the managed enclave.
+    pub enclave_name: String,
     /// A thread-safe handle to the enclave's resources.
     enclave_handle: Arc<Mutex<EnclaveHandle>>,
 }
 
-impl ToString for EnclaveState {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for EnclaveState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EnclaveState::Empty => "EMPTY",
-            EnclaveState::Running => "RUNNING",
-            EnclaveState::Terminating => "TERMINATING",
+            EnclaveState::Empty => write!(f, "EMPTY"),
+            EnclaveState::Running => write!(f, "RUNNING"),
+            EnclaveState::Terminating => write!(f, "TERMINATING"),
         }
-        .to_string()
     }
 }
 
-impl Default for EnclaveState {
+impl Default for EnclaveBuildInfo {
     fn default() -> Self {
-        EnclaveState::Empty
+        EnclaveBuildInfo::new(BTreeMap::new())
     }
 }
 
@@ -359,7 +361,7 @@ impl ResourceAllocator {
         // Always allocate larger pages first, to reduce fragmentation and page count.
         // Once an allocation of a given page size fails, proceed to the next smaller
         // page size and retry.
-        for (_, page_info) in HUGE_PAGE_MAP.iter().enumerate() {
+        for page_info in HUGE_PAGE_MAP.iter() {
             while needed_mem >= page_info.1 as i64 {
                 match MemoryRegion::new(page_info.0) {
                     Ok(value) => {
@@ -377,10 +379,10 @@ impl ResourceAllocator {
         // larger-page allocations (Ex: if we have 1 x 1 GB page and 1 x 2 MB page, but
         // we want to allocate only 512 MB, the above algorithm will have allocated only
         // the 2 MB page, since the 1 GB page was too large for what was needed; we now
-        // need to allocate in increasing order of page size in order to reduce westage).
+        // need to allocate in increasing order of page size in order to reduce wastage).
 
         if needed_mem > 0 {
-            for (_, page_info) in HUGE_PAGE_MAP.iter().rev().enumerate() {
+            for page_info in HUGE_PAGE_MAP.iter().rev() {
                 while needed_mem > 0 {
                     match MemoryRegion::new(page_info.0) {
                         Ok(value) => {
@@ -393,7 +395,7 @@ impl ResourceAllocator {
             }
         }
 
-        // If we still have memory to alocate, it means we have insufficient resources.
+        // If we still have memory to allocate, it means we have insufficient resources.
         if needed_mem > 0 {
             return Err(new_nitro_cli_failure!(
                 &format!(
@@ -411,7 +413,7 @@ impl ResourceAllocator {
             .sort_by(|reg1, reg2| reg2.mem_size.cmp(&reg1.mem_size));
 
         needed_mem = self.requested_mem as i64;
-        for (_, region) in self.mem_regions.iter().enumerate() {
+        for region in self.mem_regions.iter() {
             if needed_mem <= 0 {
                 break;
             }
@@ -425,7 +427,7 @@ impl ResourceAllocator {
         self.mem_regions.drain(split_index..);
 
         // Generate a summary of the allocated memory.
-        for (_, region) in self.mem_regions.iter().enumerate() {
+        for region in self.mem_regions.iter() {
             if let Some(page_count) = allocated_pages.get_mut(&region.mem_size) {
                 *page_count += 1;
             } else {
@@ -539,17 +541,23 @@ impl EnclaveHandle {
                 .map_err(|e| e.add_subaction("Create resource allocator".to_string()))?,
             eif_file: Some(eif_file),
             state: EnclaveState::default(),
+            build_info: EnclaveBuildInfo::new(BTreeMap::new()),
+            metadata: None,
         })
     }
 
     /// Initialize the enclave environment and start the enclave.
-    fn create_enclave(&mut self, connection: Option<&Connection>) -> NitroCliResult<String> {
+    fn create_enclave(
+        &mut self,
+        enclave_name: String,
+        connection: Option<&Connection>,
+    ) -> NitroCliResult<String> {
         self.init_memory(connection)
             .map_err(|e| e.add_subaction("Memory initialization issue".to_string()))?;
         self.init_cpus()
             .map_err(|e| e.add_subaction("vCPUs initialization issue".to_string()))?;
 
-        let sockaddr = SockAddr::new_vsock(VMADDR_CID_PARENT, ENCLAVE_READY_VSOCK_PORT);
+        let sockaddr = VsockAddr::new(VMADDR_CID_PARENT, ENCLAVE_READY_VSOCK_PORT);
         let listener = VsockListener::bind(&sockaddr).map_err(|_| {
             new_nitro_cli_failure!(
                 "Enclave boot heartbeat vsock connection - vsock bind error",
@@ -561,10 +569,27 @@ impl EnclaveHandle {
             .start(connection)
             .map_err(|e| e.add_subaction("Enclave start issue".to_string()))?;
 
-        // Update the poll timeout to be 1 minute per 100 GiB of enclave memory.
-        let poll_timeout: c_int = ((1 + (self.allocated_memory_mib * MiB - 1) / (100 * GiB))
-            as i32)
-            .saturating_mul(TIMEOUT_MINUTE_MS);
+        // Get eif size to feed it to calculate_necessary_timeout helper function
+        let eif_size = self
+            .eif_file
+            .as_ref()
+            .ok_or_else(|| {
+                new_nitro_cli_failure!(
+                    "Failed to get EIF file",
+                    NitroCliErrorEnum::FileOperationFailure
+                )
+            })?
+            .metadata()
+            .map_err(|e| {
+                new_nitro_cli_failure!(
+                    &format!("Failed to get enclave image file metadata: {:?}", e),
+                    NitroCliErrorEnum::FileOperationFailure
+                )
+            })?
+            .len();
+
+        // Update the poll timeout based on the eif size or allocated memory
+        let poll_timeout = calculate_necessary_timeout(eif_size, self.allocated_memory_mib * MiB);
 
         enclave_ready(listener, poll_timeout).map_err(|err| {
             let err_msg = format!("Waiting on enclave to boot failed with error {:?}", err);
@@ -575,6 +600,7 @@ impl EnclaveHandle {
         self.enclave_cid = Some(enclave_start.enclave_cid);
 
         let info = get_run_enclaves_info(
+            enclave_name,
             enclave_start.enclave_cid,
             self.slot_uid,
             self.cpu_ids.clone(),
@@ -689,7 +715,10 @@ impl EnclaveHandle {
 
     /// Start an enclave after providing it with its necessary resources.
     fn start(&mut self, connection: Option<&Connection>) -> NitroCliResult<EnclaveStartInfo> {
-        let mut start = EnclaveStartInfo::new(&self);
+        let mut start = EnclaveStartInfo {
+            flags: self.flags,
+            enclave_cid: self.enclave_cid.unwrap_or(0),
+        };
 
         EnclaveHandle::do_ioctl(self.enc_fd, NE_START_ENCLAVE, &mut start)
             .map_err(|e| e.add_subaction("Start enclave ioctl failed".to_string()))?;
@@ -720,7 +749,7 @@ impl EnclaveHandle {
                 .map_err(|e| e.add_subaction("Failed to release used memory".to_string()))?;
             info!("Enclave terminated.");
 
-            // Mark enclave as termiated.
+            // Mark enclave as terminated.
             self.clear();
         }
 
@@ -850,24 +879,6 @@ impl Drop for EnclaveHandle {
     }
 }
 
-impl EnclaveStartInfo {
-    /// Create a new `EnclaveStartInfo` instance from the given enclave handle.
-    fn new(enclave_handle: &EnclaveHandle) -> Self {
-        EnclaveStartInfo {
-            flags: enclave_handle.flags,
-            enclave_cid: enclave_handle.enclave_cid.unwrap_or(0),
-        }
-    }
-
-    /// Create an empty `EnclaveStartInfo` instance.
-    pub fn new_empty() -> Self {
-        EnclaveStartInfo {
-            flags: 0,
-            enclave_cid: 0,
-        }
-    }
-}
-
 impl EnclaveManager {
     /// Create a new `EnclaveManager` instance.
     pub fn new(
@@ -876,12 +887,14 @@ impl EnclaveManager {
         cpu_ids: EnclaveCpuConfig,
         eif_file: File,
         debug_mode: bool,
+        enclave_name: String,
     ) -> NitroCliResult<Self> {
         let enclave_handle =
             EnclaveHandle::new(enclave_cid, memory_mib, cpu_ids, eif_file, debug_mode)
                 .map_err(|e| e.add_subaction("Failed to create enclave handle".to_string()))?;
         Ok(EnclaveManager {
             enclave_id: String::new(),
+            enclave_name,
             enclave_handle: Arc::new(Mutex::new(enclave_handle)),
         })
     }
@@ -900,8 +913,39 @@ impl EnclaveManager {
                     NitroCliErrorEnum::LockAcquireFailure
                 )
             })?
-            .create_enclave(connection)
+            .create_enclave(self.enclave_name.clone(), connection)
             .map_err(|e| e.add_subaction("Failed to create enclave".to_string()))?;
+        Ok(())
+    }
+
+    /// Set measurements field inside EnclaveHandle
+    pub fn set_measurements(
+        &mut self,
+        measurements: BTreeMap<String, String>,
+    ) -> NitroCliResult<()> {
+        self.enclave_handle
+            .lock()
+            .map_err(|e| {
+                new_nitro_cli_failure!(
+                    &format!("Failed to acquire lock: {:?}", e),
+                    NitroCliErrorEnum::LockAcquireFailure
+                )
+            })?
+            .build_info = EnclaveBuildInfo::new(measurements);
+        Ok(())
+    }
+
+    /// Set metadata field inside EnclaveHandle
+    pub fn set_metadata(&mut self, metadata: EifIdentityInfo) -> NitroCliResult<()> {
+        self.enclave_handle
+            .lock()
+            .map_err(|e| {
+                new_nitro_cli_failure!(
+                    &format!("Failed to acquire lock: {:?}", e),
+                    NitroCliErrorEnum::LockAcquireFailure
+                )
+            })?
+            .metadata = Some(metadata);
         Ok(())
     }
 
@@ -924,6 +968,28 @@ impl EnclaveManager {
             locked_handle.flags,
             locked_handle.state.clone(),
         ))
+    }
+
+    /// Get measurements from enclave handle
+    pub fn get_measurements(&self) -> NitroCliResult<EnclaveBuildInfo> {
+        let locked_handle = self.enclave_handle.lock().map_err(|e| {
+            new_nitro_cli_failure!(
+                &format!("Failed to acquire lock: {:?}", e),
+                NitroCliErrorEnum::LockAcquireFailure
+            )
+        })?;
+        Ok(locked_handle.build_info.clone())
+    }
+
+    /// Get metadata from enclave handle
+    pub fn get_metadata(&self) -> NitroCliResult<Option<EifIdentityInfo>> {
+        let locked_handle = self.enclave_handle.lock().map_err(|e| {
+            new_nitro_cli_failure!(
+                &format!("Failed to acquire lock: {:?}", e),
+                NitroCliErrorEnum::LockAcquireFailure
+            )
+        })?;
+        Ok(locked_handle.metadata.clone())
     }
 
     /// Get the resources (enclave CID) needed for connecting to the enclave console.
@@ -1039,7 +1105,7 @@ fn write_eif_to_regions(
         })?
         .len() as usize;
 
-    eif_file.seek(SeekFrom::Start(0)).map_err(|_| {
+    eif_file.rewind().map_err(|_| {
         new_nitro_cli_failure!(
             "Failed to seek to the beginning of the EIF file",
             NitroCliErrorEnum::FileOperationFailure
@@ -1071,7 +1137,7 @@ fn write_eif_to_regions(
             })?;
 
         if written_plus_region_size <= image_write_offset {
-            // All bytes need to be skiped to get to the image write offset.
+            // All bytes need to be skipped to get to the image write offset.
         } else {
             let region_offset = image_write_offset.saturating_sub(total_written);
             let file_offset = total_written.saturating_sub(image_write_offset);
@@ -1115,4 +1181,67 @@ pub fn between_packets_delay() -> Option<Duration> {
     }
 
     None
+}
+
+/// Helper function which contains heuristic for enclave build timeout calculation
+///
+/// # Arguments
+///
+/// * `eif_size` - The EIF size in bytes
+/// * `allocated_memory` - The memory size in bytes
+///
+/// # Examples
+///
+/// ```
+/// use nitro_cli::enclave_proc::resource_manager::calculate_necessary_timeout;
+/// use nitro_cli::enclave_proc::utils::GiB;
+/// // Returns the timeout based on the 8GiB EIF size and 32GiB of allocated memory
+/// let timeout = calculate_necessary_timeout(8 * GiB, 32 * GiB);
+/// ```
+pub fn calculate_necessary_timeout(eif_size: u64, allocated_memory: u64) -> c_int {
+    // in case we have a valid eif_size give TIMEOUT_MINUTE_MS ms for each 6GiB
+    let eif_size_timeout: c_int =
+        ((1 + (eif_size - 1) / (6 * GiB)) as i32).saturating_mul(TIMEOUT_MINUTE_MS);
+
+    // Update the poll timeout to be TIMEOUT_MINUTE_MS per 100 GiB of enclave memory.
+    let allocated_memory_timeout: c_int =
+        ((1 + (allocated_memory - 1) / (100 * GiB)) as i32).saturating_mul(TIMEOUT_MINUTE_MS);
+
+    eif_size_timeout + allocated_memory_timeout
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calculate_necessary_timeout;
+    use crate::enclave_proc::utils::GiB;
+    use eif_loader::TIMEOUT_MINUTE_MS;
+
+    #[test]
+    fn test_timeout_calculation() {
+        assert_eq!(
+            calculate_necessary_timeout(2 * GiB, 32 * GiB),
+            2 * TIMEOUT_MINUTE_MS
+        );
+        assert_eq!(
+            calculate_necessary_timeout(6 * GiB, 32 * GiB),
+            2 * TIMEOUT_MINUTE_MS
+        );
+        assert_eq!(
+            calculate_necessary_timeout(10 * GiB, 32 * GiB),
+            3 * TIMEOUT_MINUTE_MS
+        );
+
+        assert_eq!(
+            calculate_necessary_timeout(2 * GiB, 128 * GiB),
+            3 * TIMEOUT_MINUTE_MS
+        );
+        assert_eq!(
+            calculate_necessary_timeout(6 * GiB, 128 * GiB),
+            3 * TIMEOUT_MINUTE_MS
+        );
+        assert_eq!(
+            calculate_necessary_timeout(10 * GiB, 128 * GiB),
+            4 * TIMEOUT_MINUTE_MS
+        );
+    }
 }

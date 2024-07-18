@@ -1,0 +1,71 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  build:
+    name: Test on rust ${{matrix.rust}}  (keys ${{ matrix.key_feature_set }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+          rust: [1.68.2, stable, nightly]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{matrix.rust}}
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo build --all --locked
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: rustup component add clippy
+    - run: cargo clippy --all
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: rustup component add rustfmt
+    - run: cargo fmt --all -- --check
+
+  audit:
+    name: Check dependencies for security issues
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo install --locked --version "~0.17" cargo-audit
+    - run: cargo audit --ignore RUSTSEC-2020-0159 --ignore RUSTSEC-2020-0071
+
+  license:
+    name: Check dependencies for licenses
+    runs-on: ubuntu-latest
+    outputs:
+      license_changed: ${{ steps.license_diff.outputs.license_changed }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo install --locked --version "0.5.0" cargo-about
+    - run: cargo about generate --workspace --output-file "${{ runner.temp }}/licenses.html" about.hbs
+    - id: license_diff
+      run: |
+        if diff -q THIRD_PARTY_LICENSES_RUST_CRATES.html ${{ runner.temp }}/licenses.html ; then
+          echo "license_changed=NO" >> $GITHUB_OUTPUT
+        else
+          echo "license_changed=YES" >> $GITHUB_OUTPUT
+        fi
+

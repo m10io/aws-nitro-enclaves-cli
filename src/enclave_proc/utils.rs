@@ -7,7 +7,7 @@ use std::fs::metadata;
 use std::fs::File;
 use std::io::Read;
 
-use crate::common::json_output::{EnclaveDescribeInfo, EnclaveRunInfo};
+use crate::common::json_output::{EnclaveDescribeInfo, EnclaveRunInfo, MetadataDescribeInfo};
 use crate::common::{NitroCliErrorEnum, NitroCliFailure, NitroCliResult};
 use crate::enclave_proc::resource_manager::EnclaveManager;
 use crate::enclave_proc::resource_manager::NE_ENCLAVE_DEBUG_MODE;
@@ -38,29 +38,50 @@ pub fn flags_to_string(flags: u64) -> String {
 /// Obtain the enclave information requested by the `describe-enclaves` command.
 pub fn get_enclave_describe_info(
     enclave_manager: &EnclaveManager,
+    with_metadata: bool,
 ) -> NitroCliResult<EnclaveDescribeInfo> {
-    let (slot_uid, enclave_cid, cpus_count, cpu_ids, memory_mib, flags, state) =
+    let (slot_uid, enclave_cid, cpu_count, cpu_ids, memory_mib, flags, state) =
         enclave_manager.get_description_resources()?;
-    let info = EnclaveDescribeInfo::new(
-        generate_enclave_id(slot_uid)?,
+    let mut describe_meta: Option<MetadataDescribeInfo> = None;
+    let mut img_name: Option<String> = None;
+    let mut img_version: Option<String> = None;
+
+    if with_metadata {
+        if let Some(meta) = enclave_manager.get_metadata()? {
+            img_name = Some(meta.img_name.clone());
+            img_version = Some(meta.img_version.clone());
+            describe_meta = Some(MetadataDescribeInfo::new(meta));
+        }
+    }
+
+    let info = EnclaveDescribeInfo {
+        enclave_name: Some(enclave_manager.enclave_name.clone()),
+        enclave_id: generate_enclave_id(slot_uid)?,
+        process_id: std::process::id(),
         enclave_cid,
-        cpus_count,
+        cpu_count,
         cpu_ids,
         memory_mib,
-        state.to_string(),
-        flags_to_string(flags),
-    );
+        state: state.to_string(),
+        flags: flags_to_string(flags),
+        build_info: Some(enclave_manager.get_measurements()?),
+        img_name,
+        img_version,
+        metadata: describe_meta,
+    };
     Ok(info)
 }
 
 /// Obtain the enclave information requested by the `run-enclaves` command.
 pub fn get_run_enclaves_info(
+    enclave_name: String,
     enclave_cid: u64,
     slot_id: u64,
     cpu_ids: Vec<u32>,
     memory: u64,
 ) -> NitroCliResult<EnclaveRunInfo> {
     let info = EnclaveRunInfo::new(
+        enclave_name,
         generate_enclave_id(slot_id)?,
         enclave_cid,
         cpu_ids.len(),
@@ -100,8 +121,9 @@ pub fn get_slot_id(enclave_id: String) -> Result<u64, String> {
     let tokens: Vec<&str> = enclave_id.split("-enc").collect();
 
     match tokens.get(1) {
-        Some(slot_id) => u64::from_str_radix(*slot_id, 16)
-            .map_err(|_err| "Invalid enclave id format".to_string()),
+        Some(slot_id) => {
+            u64::from_str_radix(slot_id, 16).map_err(|_err| "Invalid enclave id format".to_string())
+        }
         None => Err("Invalid enclave_id.".to_string()),
     }
 }
@@ -175,12 +197,14 @@ mod tests {
     /// exactly the same values as the supplied arguments.
     #[test]
     fn test_get_run_enclaves_info() {
+        let enclave_name = "testName".to_string();
         let enclave_cid: u64 = 0;
         let slot_id: u64 = 7;
         let cpu_ids: Vec<u32> = vec![1, 3];
         let memory: u64 = 64;
 
-        let result = get_run_enclaves_info(enclave_cid, slot_id, cpu_ids.clone(), memory);
+        let result =
+            get_run_enclaves_info(enclave_name, enclave_cid, slot_id, cpu_ids.clone(), memory);
 
         assert!(result.is_ok());
 
@@ -198,12 +222,14 @@ mod tests {
     /// id, which is obtained through a call to `get_run_enclaves_info()`.
     #[test]
     fn test_get_enclave_id() {
+        let enclave_name = "testName".to_string();
         let enclave_cid: u64 = 0;
         let slot_id: u64 = 8;
         let cpu_ids: Vec<u32> = vec![1, 3];
         let memory: u64 = 64;
 
-        let result = get_run_enclaves_info(enclave_cid, slot_id, cpu_ids.clone(), memory);
+        let result =
+            get_run_enclaves_info(enclave_name, enclave_cid, slot_id, cpu_ids.clone(), memory);
 
         assert!(result.is_ok());
 

@@ -8,6 +8,10 @@ use nix::sys::epoll::{self, EpollEvent, EpollFlags, EpollOp};
 use std::fs::set_permissions;
 use std::fs::Permissions;
 use std::io;
+
+#[cfg(test)]
+use std::os::raw::c_char;
+
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -229,16 +233,16 @@ impl ConnectionListener {
     pub fn get_next_connection(&self, enc_fd: Option<RawFd>) -> NitroCliResult<Connection> {
         // Wait on epoll until a valid event is received.
         let mut events = [EpollEvent::empty(); 1];
-
         loop {
-            let num_events = epoll::epoll_wait(self.epoll_fd, &mut events, -1).map_err(|e| {
-                new_nitro_cli_failure!(
-                    &format!("Failed to wait on epoll: {:?}", e),
-                    NitroCliErrorEnum::EpollError
-                )
-            })?;
-            if num_events > 0 {
-                break;
+            match epoll::epoll_wait(self.epoll_fd, &mut events, -1) {
+                Ok(_) => break,
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => {
+                    return Err(new_nitro_cli_failure!(
+                        &format!("Failed to wait on epoll: {:?}", e),
+                        NitroCliErrorEnum::EpollError
+                    ))
+                }
             }
         }
 
@@ -316,8 +320,8 @@ mod tests {
     const THREADS_STR: &str = "Threads:";
     const TMP_DIR: &str = "./npe";
 
-    fn unset_envvar(varname: &String) {
-        unsafe { libc::unsetenv(varname.as_ptr() as *const i8) };
+    fn unset_envvar(varname: &str) {
+        unsafe { libc::unsetenv(varname.as_ptr() as *const c_char) };
     }
 
     /// Inspects the content of /proc/<PID>/status in order to
@@ -389,7 +393,7 @@ mod tests {
                 &mut cli_evt,
             );
 
-            assert_eq!(result.is_err(), true);
+            assert!(result.is_err());
         }
     }
 

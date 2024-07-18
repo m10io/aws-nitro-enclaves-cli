@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2020-2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  */
 
 /**
@@ -24,6 +24,7 @@
 #include <linux/nitro_enclaves.h>
 #include <linux/pci.h>
 #include <linux/poll.h>
+#include <linux/range.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <uapi/linux/vm_sockets.h>
@@ -203,6 +204,23 @@ static inline unsigned long page_size(struct page *page)
 }
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+static inline u64 range_len(const struct range *range)
+{
+	return range->end - range->start + 1;
+}
+#endif
+
+/**
+ * struct ne_phys_contig_mem_regions - Contiguous physical memory regions.
+ * @num:	The number of regions that currently has.
+ * @regions:	The array of physical memory regions.
+ */
+struct ne_phys_contig_mem_regions {
+	unsigned long num;
+	struct range  *regions;
+};
+
 /**
  * ne_check_enclaves_created() - Verify if at least one enclave has been created.
  * @void:	No parameters provided.
@@ -245,15 +263,20 @@ static bool ne_check_enclaves_created(void)
  */
 static int ne_setup_cpu_pool(const char *ne_cpu_list)
 {
-	int core_id = -1;
+	int core_id = 0;
 	unsigned int cpu = 0;
+	unsigned int sibling = 0;
 	cpumask_var_t cpu_pool;
+	cpumask_var_t cpu_added;
 	unsigned int cpu_sibling = 0;
 	unsigned int i = 0;
 	int numa_node = -1;
 	int rc = -EINVAL;
 
 	if (!zalloc_cpumask_var(&cpu_pool, GFP_KERNEL))
+		return -ENOMEM;
+
+	if (!zalloc_cpumask_var(&cpu_added, GFP_KERNEL))
 		return -ENOMEM;
 
 	mutex_lock(&ne_cpu_pool.mutex);
@@ -362,8 +385,8 @@ static int ne_setup_cpu_pool(const char *ne_cpu_list)
 	ne_cpu_pool.nr_parent_vm_cores = nr_cpu_ids / ne_cpu_pool.nr_threads_per_core;
 
 	ne_cpu_pool.avail_threads_per_core = kcalloc(ne_cpu_pool.nr_parent_vm_cores,
-					     sizeof(*ne_cpu_pool.avail_threads_per_core),
-					     GFP_KERNEL);
+						     sizeof(*ne_cpu_pool.avail_threads_per_core),
+						     GFP_KERNEL);
 	if (!ne_cpu_pool.avail_threads_per_core) {
 		rc = -ENOMEM;
 
@@ -381,19 +404,14 @@ static int ne_setup_cpu_pool(const char *ne_cpu_list)
 	 * Split the NE CPU pool in threads per core to keep the CPU topology
 	 * after offlining the CPUs.
 	 */
-	for_each_cpu(cpu, cpu_pool) {
-		core_id = topology_core_id(cpu);
-		if (core_id < 0 || core_id >= ne_cpu_pool.nr_parent_vm_cores) {
-			pr_err("%s: Invalid core id  %d for CPU %d\n",
-			       ne_misc_dev.name, core_id, cpu);
-
-			rc = -EINVAL;
-
-			goto clear_cpumask;
+	for_each_cpu(cpu, cpu_pool)
+		if (!cpumask_test_cpu(cpu, cpu_added)) {
+			for_each_cpu(sibling, topology_sibling_cpumask(cpu)) {
+					cpumask_set_cpu(sibling, cpu_added);
+					cpumask_set_cpu(sibling, ne_cpu_pool.avail_threads_per_core[core_id]);
+			}
+			core_id++;
 		}
-
-		cpumask_set_cpu(cpu, ne_cpu_pool.avail_threads_per_core[core_id]);
-	}
 
 	/*
 	 * CPUs that are given to enclave(s) should not be considered online
@@ -426,7 +444,6 @@ static int ne_setup_cpu_pool(const char *ne_cpu_list)
 online_cpus:
 	for_each_cpu(cpu, cpu_pool)
 		add_cpu(cpu);
-clear_cpumask:
 	for (i = 0; i < ne_cpu_pool.nr_parent_vm_cores; i++)
 		cpumask_clear(ne_cpu_pool.avail_threads_per_core[i]);
 free_cores_cpumask:
@@ -813,7 +830,7 @@ static int ne_add_vcpu_ioctl(struct ne_enclave *ne_enclave, u32 vcpu_id)
  * * Negative return value on failure.
  */
 static int ne_sanity_check_user_mem_region(struct ne_enclave *ne_enclave,
-	struct ne_user_memory_region mem_region)
+					   struct ne_user_memory_region mem_region)
 {
 	struct ne_mem_region *ne_mem_region = NULL;
 
@@ -849,7 +866,7 @@ static int ne_sanity_check_user_mem_region(struct ne_enclave *ne_enclave,
 		u64 userspace_addr = ne_mem_region->userspace_addr;
 
 		if ((userspace_addr <= mem_region.userspace_addr &&
-		    mem_region.userspace_addr < (userspace_addr + memory_size)) ||
+		     mem_region.userspace_addr < (userspace_addr + memory_size)) ||
 		    (mem_region.userspace_addr <= userspace_addr &&
 		    (mem_region.userspace_addr + mem_region.memory_size) > userspace_addr)) {
 			dev_err_ratelimited(ne_misc_dev.this_device,
@@ -903,6 +920,72 @@ static int ne_sanity_check_user_mem_region_page(struct ne_enclave *ne_enclave,
 }
 
 /**
+ * ne_sanity_check_phys_mem_region() - Sanity check the start address and the size
+ *                                     of a physical memory region.
+ * @phys_mem_region_paddr : Physical start address of the region to be sanity checked.
+ * @phys_mem_region_size  : Length of the region to be sanity checked.
+ *
+ * Context: Process context. This function is called with the ne_enclave mutex held.
+ * Return:
+ * * 0 on success.
+ * * Negative return value on failure.
+ */
+static int ne_sanity_check_phys_mem_region(u64 phys_mem_region_paddr,
+					   u64 phys_mem_region_size)
+{
+	if (phys_mem_region_size & (NE_MIN_MEM_REGION_SIZE - 1)) {
+		dev_err_ratelimited(ne_misc_dev.this_device,
+				    "Physical mem region size is not multiple of 2 MiB\n");
+
+		return -EINVAL;
+	}
+
+	if (!IS_ALIGNED(phys_mem_region_paddr, NE_MIN_MEM_REGION_SIZE)) {
+		dev_err_ratelimited(ne_misc_dev.this_device,
+				    "Physical mem region address is not 2 MiB aligned\n");
+
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+/**
+ * ne_merge_phys_contig_memory_regions() - Add a memory region and merge the adjacent
+ *                                         regions if they are physically contiguous.
+ * @phys_contig_regions : Private data associated with the contiguous physical memory regions.
+ * @page_paddr :          Physical start address of the region to be added.
+ * @page_size :           Length of the region to be added.
+ *
+ * Context: Process context. This function is called with the ne_enclave mutex held.
+ * Return:
+ * * 0 on success.
+ * * Negative return value on failure.
+ */
+static int
+ne_merge_phys_contig_memory_regions(struct ne_phys_contig_mem_regions *phys_contig_regions,
+				    u64 page_paddr, u64 page_size)
+{
+	unsigned long num = phys_contig_regions->num;
+	int rc = 0;
+
+	rc = ne_sanity_check_phys_mem_region(page_paddr, page_size);
+	if (rc < 0)
+		return rc;
+
+	/* Physically contiguous, just merge */
+	if (num && (phys_contig_regions->regions[num - 1].end + 1) == page_paddr) {
+		phys_contig_regions->regions[num - 1].end += page_size;
+	} else {
+		phys_contig_regions->regions[num].start = page_paddr;
+		phys_contig_regions->regions[num].end = page_paddr + page_size - 1;
+		phys_contig_regions->num++;
+	}
+
+	return 0;
+}
+
+/**
  * ne_set_user_memory_region_ioctl() - Add user space memory region to the slot
  *				       associated with the current enclave.
  * @ne_enclave :	Private data associated with the current enclave.
@@ -914,16 +997,15 @@ static int ne_sanity_check_user_mem_region_page(struct ne_enclave *ne_enclave,
  * * Negative return value on failure.
  */
 static int ne_set_user_memory_region_ioctl(struct ne_enclave *ne_enclave,
-	struct ne_user_memory_region mem_region)
+					   struct ne_user_memory_region mem_region)
 {
 	long gup_rc = 0;
 	unsigned long i = 0;
 	unsigned long max_nr_pages = 0;
 	unsigned long memory_size = 0;
 	struct ne_mem_region *ne_mem_region = NULL;
-	unsigned long nr_phys_contig_mem_regions = 0;
 	struct pci_dev *pdev = ne_devs.ne_pci_dev->pdev;
-	struct page **phys_contig_mem_regions = NULL;
+	struct ne_phys_contig_mem_regions phys_contig_mem_regions = {};
 	int rc = -EINVAL;
 
 	rc = ne_sanity_check_user_mem_region(ne_enclave, mem_region);
@@ -944,9 +1026,10 @@ static int ne_set_user_memory_region_ioctl(struct ne_enclave *ne_enclave,
 		goto free_mem_region;
 	}
 
-	phys_contig_mem_regions = kcalloc(max_nr_pages, sizeof(*phys_contig_mem_regions),
-					  GFP_KERNEL);
-	if (!phys_contig_mem_regions) {
+	phys_contig_mem_regions.regions = kcalloc(max_nr_pages,
+						  sizeof(*phys_contig_mem_regions.regions),
+						  GFP_KERNEL);
+	if (!phys_contig_mem_regions.regions) {
 		rc = -ENOMEM;
 
 		goto free_mem_region;
@@ -964,8 +1047,9 @@ static int ne_set_user_memory_region_ioctl(struct ne_enclave *ne_enclave,
 			goto put_pages;
 		}
 
-		gup_rc = get_user_pages(mem_region.userspace_addr + memory_size, 1, FOLL_GET,
-					ne_mem_region->pages + i, NULL);
+		gup_rc = get_user_pages_unlocked(mem_region.userspace_addr + memory_size, 1,
+						 ne_mem_region->pages + i, FOLL_GET);
+
 		if (gup_rc < 0) {
 			rc = gup_rc;
 
@@ -979,26 +1063,18 @@ static int ne_set_user_memory_region_ioctl(struct ne_enclave *ne_enclave,
 		if (rc < 0)
 			goto put_pages;
 
-		/*
-		 * TODO: Update once handled non-contiguous memory regions
-		 * received from user space or contiguous physical memory regions
-		 * larger than 2 MiB e.g. 8 MiB.
-		 */
-		phys_contig_mem_regions[i] = ne_mem_region->pages[i];
+		rc = ne_merge_phys_contig_memory_regions(&phys_contig_mem_regions,
+							 page_to_phys(ne_mem_region->pages[i]),
+							 page_size(ne_mem_region->pages[i]));
+		if (rc < 0)
+			goto put_pages;
 
 		memory_size += page_size(ne_mem_region->pages[i]);
 
 		ne_mem_region->nr_pages++;
 	} while (memory_size < mem_region.memory_size);
 
-	/*
-	 * TODO: Update once handled non-contiguous memory regions received
-	 * from user space or contiguous physical memory regions larger than
-	 * 2 MiB e.g. 8 MiB.
-	 */
-	nr_phys_contig_mem_regions = ne_mem_region->nr_pages;
-
-	if ((ne_enclave->nr_mem_regions + nr_phys_contig_mem_regions) >
+	if ((ne_enclave->nr_mem_regions + phys_contig_mem_regions.num) >
 	    ne_enclave->max_mem_regions) {
 		dev_err_ratelimited(ne_misc_dev.this_device,
 				    "Reached max memory regions %lld\n",
@@ -1009,27 +1085,13 @@ static int ne_set_user_memory_region_ioctl(struct ne_enclave *ne_enclave,
 		goto put_pages;
 	}
 
-	for (i = 0; i < nr_phys_contig_mem_regions; i++) {
-		u64 phys_region_addr = page_to_phys(phys_contig_mem_regions[i]);
-		u64 phys_region_size = page_size(phys_contig_mem_regions[i]);
+	for (i = 0; i < phys_contig_mem_regions.num; i++) {
+		u64 phys_region_addr = phys_contig_mem_regions.regions[i].start;
+		u64 phys_region_size = range_len(&phys_contig_mem_regions.regions[i]);
 
-		if (phys_region_size & (NE_MIN_MEM_REGION_SIZE - 1)) {
-			dev_err_ratelimited(ne_misc_dev.this_device,
-					    "Physical mem region size is not multiple of 2 MiB\n");
-
-			rc = -EINVAL;
-
+		rc = ne_sanity_check_phys_mem_region(phys_region_addr, phys_region_size);
+		if (rc < 0)
 			goto put_pages;
-		}
-
-		if (!IS_ALIGNED(phys_region_addr, NE_MIN_MEM_REGION_SIZE)) {
-			dev_err_ratelimited(ne_misc_dev.this_device,
-					    "Physical mem region address is not 2 MiB aligned\n");
-
-			rc = -EINVAL;
-
-			goto put_pages;
-		}
 	}
 
 	ne_mem_region->memory_size = mem_region.memory_size;
@@ -1037,13 +1099,13 @@ static int ne_set_user_memory_region_ioctl(struct ne_enclave *ne_enclave,
 
 	list_add(&ne_mem_region->mem_region_list_entry, &ne_enclave->mem_regions_list);
 
-	for (i = 0; i < nr_phys_contig_mem_regions; i++) {
+	for (i = 0; i < phys_contig_mem_regions.num; i++) {
 		struct ne_pci_dev_cmd_reply cmd_reply = {};
 		struct slot_add_mem_req slot_add_mem_req = {};
 
 		slot_add_mem_req.slot_uid = ne_enclave->slot_uid;
-		slot_add_mem_req.paddr = page_to_phys(phys_contig_mem_regions[i]);
-		slot_add_mem_req.size = page_size(phys_contig_mem_regions[i]);
+		slot_add_mem_req.paddr = phys_contig_mem_regions.regions[i].start;
+		slot_add_mem_req.size = range_len(&phys_contig_mem_regions.regions[i]);
 
 		rc = ne_do_request(pdev, SLOT_ADD_MEM,
 				   &slot_add_mem_req, sizeof(slot_add_mem_req),
@@ -1052,7 +1114,7 @@ static int ne_set_user_memory_region_ioctl(struct ne_enclave *ne_enclave,
 			dev_err_ratelimited(ne_misc_dev.this_device,
 					    "Error in slot add mem [rc=%d]\n", rc);
 
-			kfree(phys_contig_mem_regions);
+			kfree(phys_contig_mem_regions.regions);
 
 			/*
 			 * Exit here without put pages as memory regions may
@@ -1065,7 +1127,7 @@ static int ne_set_user_memory_region_ioctl(struct ne_enclave *ne_enclave,
 		ne_enclave->nr_mem_regions++;
 	}
 
-	kfree(phys_contig_mem_regions);
+	kfree(phys_contig_mem_regions.regions);
 
 	return 0;
 
@@ -1073,7 +1135,7 @@ put_pages:
 	for (i = 0; i < ne_mem_region->nr_pages; i++)
 		put_page(ne_mem_region->pages[i]);
 free_mem_region:
-	kfree(phys_contig_mem_regions);
+	kfree(phys_contig_mem_regions.regions);
 	kfree(ne_mem_region->pages);
 	kfree(ne_mem_region);
 
@@ -1092,7 +1154,7 @@ free_mem_region:
  * * Negative return value on failure.
  */
 static int ne_start_enclave_ioctl(struct ne_enclave *ne_enclave,
-	struct ne_enclave_start_info *enclave_start_info)
+				  struct ne_enclave_start_info *enclave_start_info)
 {
 	struct ne_pci_dev_cmd_reply cmd_reply = {};
 	unsigned int cpu = 0;
@@ -1602,7 +1664,8 @@ static const struct file_operations ne_enclave_fops = {
  *			  enclave file descriptor to be further used for enclave
  *			  resources handling e.g. memory regions and CPUs.
  * @ne_pci_dev :	Private data associated with the PCI device.
- * @slot_uid:		Generated unique slot id associated with an enclave.
+ * @slot_uid:		User pointer to store the generated unique slot id
+ *			associated with an enclave to.
  *
  * Context: Process context. This function is called with the ne_pci_dev enclave
  *	    mutex held.
@@ -1610,7 +1673,7 @@ static const struct file_operations ne_enclave_fops = {
  * * Enclave fd on success.
  * * Negative return value on failure.
  */
-static int ne_create_vm_ioctl(struct ne_pci_dev *ne_pci_dev, u64 *slot_uid)
+static int ne_create_vm_ioctl(struct ne_pci_dev *ne_pci_dev, u64 __user *slot_uid)
 {
 	struct ne_pci_dev_cmd_reply cmd_reply = {};
 	int enclave_fd = -1;
@@ -1651,7 +1714,8 @@ static int ne_create_vm_ioctl(struct ne_pci_dev *ne_pci_dev, u64 *slot_uid)
 	mutex_unlock(&ne_cpu_pool.mutex);
 
 	ne_enclave->threads_per_core = kcalloc(ne_enclave->nr_parent_vm_cores,
-		sizeof(*ne_enclave->threads_per_core), GFP_KERNEL);
+					       sizeof(*ne_enclave->threads_per_core),
+					       GFP_KERNEL);
 	if (!ne_enclave->threads_per_core) {
 		rc = -ENOMEM;
 
@@ -1712,7 +1776,18 @@ static int ne_create_vm_ioctl(struct ne_pci_dev *ne_pci_dev, u64 *slot_uid)
 
 	list_add(&ne_enclave->enclave_list_entry, &ne_pci_dev->enclaves_list);
 
-	*slot_uid = ne_enclave->slot_uid;
+	if (copy_to_user(slot_uid, &ne_enclave->slot_uid, sizeof(ne_enclave->slot_uid))) {
+		/*
+		 * As we're holding the only reference to 'enclave_file', fput()
+		 * will call ne_enclave_release() which will do a proper cleanup
+		 * of all so far allocated resources, leaving only the unused fd
+		 * for us to free.
+		 */
+		fput(enclave_file);
+		put_unused_fd(enclave_fd);
+
+		return -EFAULT;
+	}
 
 	fd_install(enclave_fd, enclave_file);
 
@@ -1749,33 +1824,12 @@ static long ne_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case NE_CREATE_VM: {
 		int enclave_fd = -1;
-		struct file *enclave_file = NULL;
 		struct ne_pci_dev *ne_pci_dev = ne_devs.ne_pci_dev;
-		int rc = -EINVAL;
-		u64 slot_uid = 0;
+		u64 __user *slot_uid = (void __user *)arg;
 
 		mutex_lock(&ne_pci_dev->enclaves_list_mutex);
-
-		enclave_fd = ne_create_vm_ioctl(ne_pci_dev, &slot_uid);
-		if (enclave_fd < 0) {
-			rc = enclave_fd;
-
-			mutex_unlock(&ne_pci_dev->enclaves_list_mutex);
-
-			return rc;
-		}
-
+		enclave_fd = ne_create_vm_ioctl(ne_pci_dev, slot_uid);
 		mutex_unlock(&ne_pci_dev->enclaves_list_mutex);
-
-		if (copy_to_user((void __user *)arg, &slot_uid, sizeof(slot_uid))) {
-			enclave_file = fget(enclave_fd);
-			/* Decrement file refs to have release() called. */
-			fput(enclave_file);
-			fput(enclave_file);
-			put_unused_fd(enclave_fd);
-
-			return -EFAULT;
-		}
 
 		return enclave_fd;
 	}
@@ -1786,6 +1840,10 @@ static long ne_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	return 0;
 }
+
+#if defined(CONFIG_NITRO_ENCLAVES_MISC_DEV_TEST)
+#include "ne_misc_dev_test.c"
+#endif
 
 static int __init ne_init(void)
 {

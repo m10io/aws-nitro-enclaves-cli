@@ -1,21 +1,21 @@
 [package]
 name = "eif_loader"
 version = "0.1.0"
-authors = ["Alexandru Gheorghe <aggh@amazon.com>"]
+authors = ["The AWS Nitro Enclaves Team <aws-nitro-enclaves-devel@amazon.com>"]
 edition = "2018"
+rust-version = "1.68"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-eif_defs = { path = "../eif_defs"}
-nix = "0.15.0"
+aws-nitro-enclaves-image-format = "0.2"
+nix = "0.26"
 libc = "0.2"
-vsock = "0.1.5"
+vsock = "0.3"
 
 [dev-dependencies]
-eif_utils = { path = "../eif_utils"}
-sha2 = "0.8"
-tempfile = "3.1"
+sha2 = "0.9.5"
+tempfile = "3.5"
 
 [lib]
 name = "eif_loader"

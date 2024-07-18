@@ -9,6 +9,7 @@ use nix::sys::epoll::{EpollEvent, EpollFlags, EpollOp};
 use nix::unistd::*;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::borrow::BorrowMut;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
@@ -47,7 +48,11 @@ pub fn enclave_proc_spawn(logger: &EnclaveProcLogWriter) -> NitroCliResult<UnixS
 
     // Spawn an intermediate child process. This will fork again in order to
     // create the detached enclave process.
-    let fork_status = fork();
+    // Safety: enclave_proc_spawn is called early on and nitro-cli is not that this point
+    // multi-threaded, which should prevent the issues around forking. However,
+    // the safe way to do this would be to use a safe alternative such as Command to
+    // re-execute this same process with another set of parameters.
+    let fork_status = unsafe { fork() };
 
     if let Ok(ForkResult::Child) = fork_status {
         // This is our intermediate child process.
@@ -153,32 +158,25 @@ where
         .map_err(|e| {
             e.add_subaction("Failed to send command to all enclave processes".to_string())
         })?
-        .iter_mut()
-        .map(|socket| {
-            // Add each valid connection to epoll.
-            let socket_clone = socket.try_clone().map_err(|e| {
-                new_nitro_cli_failure!(
-                    &format!("Failed to clone socket: {:?}", e),
-                    NitroCliErrorEnum::SocketError
-                )
-            })?;
-            let mut process_evt =
-                EpollEvent::new(EpollFlags::EPOLLIN, socket_clone.into_raw_fd() as u64);
-            epoll::epoll_ctl(
-                epoll_fd,
-                EpollOp::EpollCtlAdd,
-                socket.as_raw_fd(),
-                &mut process_evt,
-            )
-            .map_err(|e| {
-                new_nitro_cli_failure!(
-                    &format!("Failed to register socket with epoll: {:?}", e),
-                    NitroCliErrorEnum::EpollError
-                )
-            })?;
-
+        .into_iter()
+        .map(|mut socket| {
             // Send the command.
-            enclave_proc_command_send_single(cmd, args, socket)
+            enclave_proc_command_send_single(cmd, args, socket.borrow_mut())?;
+
+            let raw_fd = socket.into_raw_fd();
+            let mut process_evt = EpollEvent::new(EpollFlags::EPOLLIN, raw_fd as u64);
+
+            // Add each valid connection to epoll.
+            epoll::epoll_ctl(epoll_fd, EpollOp::EpollCtlAdd, raw_fd, &mut process_evt).map_err(
+                |e| {
+                    new_nitro_cli_failure!(
+                        &format!("Failed to register socket with epoll: {:?}", e),
+                        NitroCliErrorEnum::EpollError
+                    )
+                },
+            )?;
+
+            Ok(())
         })
         .collect();
 
@@ -192,13 +190,13 @@ where
 
     // Get the number of expected replies.
     let mut num_replies_expected = comms.len() - num_errors;
-    let mut events = vec![EpollEvent::empty(); 1];
+    let mut events = [EpollEvent::empty(); 1];
 
     while num_replies_expected > 0 {
         let num_events = loop {
             match epoll::epoll_wait(epoll_fd, &mut events[..], ENCLAVE_PROC_WAIT_TIMEOUT_MSEC) {
                 Ok(num_events) => break num_events,
-                Err(nix::Error::Sys(nix::errno::Errno::EINTR)) => continue,
+                Err(nix::errno::Errno::EINTR) => continue,
                 // TODO: Handle bad descriptors (closed remote connections).
                 Err(e) => {
                     return Err(new_nitro_cli_failure!(
@@ -217,14 +215,29 @@ where
             continue;
         }
 
+        let input_stream_raw_fd = events[0].data() as RawFd;
+        let mut input_stream = unsafe { UnixStream::from_raw_fd(input_stream_raw_fd) };
+
         // Handle the reply we received.
-        let mut input_stream = unsafe { UnixStream::from_raw_fd(events[0].data() as RawFd) };
         if let Ok(reply) = read_u64_le(&mut input_stream) {
             if reply == MSG_ENCLAVE_CONFIRM {
                 debug!("Got confirmation from {:?}", input_stream);
                 replies.push(input_stream);
             }
         }
+
+        epoll::epoll_ctl(
+            epoll_fd,
+            EpollOp::EpollCtlDel,
+            input_stream_raw_fd,
+            Option::None,
+        )
+        .map_err(|e| {
+            new_nitro_cli_failure!(
+                &format!("Failed to remove socket from epoll: {:?}", e),
+                NitroCliErrorEnum::EpollError
+            )
+        })?;
     }
 
     // Update the number of connections that have yielded errors.
@@ -290,7 +303,7 @@ pub fn enclave_process_handle_all_replies<T>(
     prev_failed_conns: usize,
     print_as_vec: bool,
     allowed_return_codes: Vec<i32>,
-) -> NitroCliResult<()>
+) -> NitroCliResult<Vec<T>>
 where
     T: Clone + DeserializeOwned + Serialize,
 {
@@ -348,7 +361,7 @@ where
         ));
     }
 
-    Ok(())
+    Ok(objects.into_iter().map(|(o, _)| o).collect())
 }
 
 /// Obtain an enclave's CID given its full ID.

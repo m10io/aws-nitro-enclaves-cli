@@ -7,51 +7,40 @@ above mentioned port, sends commands and waits for the reply (unless --no-wait
 is used). The command-executer is useful for executing shell commands inside
 the enclave and sending/receiving files to/from the enclave.
 
-It replaces the old nc-vsock we used in the past (which we haven't bothered to
-remove yet).
+The command executer sample should be used for testing and debugging only,
+and not in a production environment.
 
 ## Building
 
+To build the `command-executer` binary and create an EIF image, use a makefile from a root repository folder:
 ```
-	$ cargo build
+	$ make -C ../../ command-executer
 ```
 
 ## Running
 
 1. Build the project (see above).
 
-2. Use the Dockerfile in resources/ either as an example or as is
-and build an EIF.
-
-```
-	$ export NITRO_CLI_BLOBS=$(realpath ../../blobs/)
-	$ nitro-cli build-enclave --docker-dir "./resources" --docker-uri mytag --output-file command-executer.eif
-```
 ---
 **NOTES**
 
-* In order to build an EIF as a non-root user, that user must be able to manage
-the docker daemon. Please see
-[the official Docker documentation](https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user)
-to learn how to do that.
-* These steps can either be done on your local machine or on the EC2 instance
+This step can either be done on your local machine or on the EC2 instance
 where you are going to launch the enclave.
 
 ---
 
-3. Copy __both__ the EIF __and__ the `command-executer` binary to the EC2
-instance you are about to run an enclave on.
+2. Copy __both__ the EIF __and__ the `command-executer` binary to the EC2
+instance you are about to run an enclave on. Both can be found under `build` folder of a root of the repository.
 
-4. Launch an enclave with the EIF containing command-executer.
+3. Launch an enclave with the EIF containing command-executer.
 
 ```
-	$ ./nitro-cli run-enclave --cpu-count 4 --memory 2048 --eif-path command_executer.eif
+	$ nitro-cli run-enclave --cpu-count 4 --memory 2048 --eif-path command-executer.eif --enclave-cid 16
 	Start allocating memory...
-	Running on instance CPUs [1, 5, 2, 6]
 	Started enclave with enclave-cid: 16, memory: 2048 MiB, cpu-ids: [1, 5, 2, 6]
-	Sending image to cid: 16 port: 7000
 	{
-	  "EnclaveID": "i-08aa8a2f7bff2ff99_enc103923520469154997",
+	  "EnclaveID": "i-abc12345def67890a-enc9876abcd543210ef12",
+	  "ProcessID": 12345,
 	  "EnclaveCID": 16,
 	  "NumberOfCPUs": 4,
 	  "CPUIDs": [
@@ -64,13 +53,13 @@ instance you are about to run an enclave on.
 	}
 ```
 
-5. Use the command-executer to send shell commands to the enclave
+4. Use the command-executer to send shell commands to the enclave
 
 ```
 	$ ./command-executer run --cid 16 --port 5005 --command "whoami"
 ```
 
-6. Use the command-executer to send files to the enclave (e.g. binaries you built in the instance)
+5. Use the command-executer to send files to the enclave (e.g. binaries you built in the instance)
 
 ```
 	$ ./command-executer send-file --cid 16 --localpath "./stress-ng" --port 5005 --remotepath "/usr/bin/stress-ng"

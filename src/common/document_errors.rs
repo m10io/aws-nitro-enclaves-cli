@@ -65,6 +65,9 @@ lazy_static! {
             (NitroCliErrorEnum::SignalMaskingError, "E54"),
             (NitroCliErrorEnum::SignalUnmaskingError, "E55"),
             (NitroCliErrorEnum::LoggerError, "E56"),
+            (NitroCliErrorEnum::HasherError, "E57"),
+            (NitroCliErrorEnum::EnclaveNamingError, "E58"),
+            (NitroCliErrorEnum::EIFSignatureCheckerError, "E59"),
         ].iter().cloned().collect();
 }
 
@@ -81,7 +84,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
             ret.push_str(
                 format!(
                     "Missing mandatory argument. User did not provide the `{}` argument.",
-                    additional_info.get(0).unwrap_or(&info_placeholder)
+                    additional_info.first().unwrap_or(&info_placeholder)
                 )
                 .as_str(),
             );
@@ -90,7 +93,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
             ret.push_str(
                 format!(
                     "Conflicting arguments. User provided both `{}` and `{}`.",
-                    additional_info.get(0).unwrap_or(&info_placeholder),
+                    additional_info.first().unwrap_or(&info_placeholder),
                     additional_info.get(1).unwrap_or(&info_placeholder)
                 )
                 .as_str(),
@@ -100,7 +103,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
             ret.push_str(
                 format!(
                     "Invalid argument provided. The parameter `{}` is not a valid integer (`{}`)",
-                    additional_info.get(0).unwrap_or(&info_placeholder),
+                    additional_info.first().unwrap_or(&info_placeholder),
                     additional_info.get(1).unwrap_or(&info_placeholder)
                 )
                 .as_str(),
@@ -157,7 +160,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
                 ret.push_str(
                     format!(
                         "\nFile: '{}', failing operation: '{}'.",
-                        additional_info.get(0).unwrap_or(&info_placeholder),
+                        additional_info.first().unwrap_or(&info_placeholder),
                         additional_info.get(1).unwrap_or(&info_placeholder),
                     )
                     .as_str(),
@@ -168,7 +171,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
             ret.push_str(
                 format!(
                     "Invalid CPU configuration. User provided `{}` contains same CPU(s) (CPU(s) {}) multiple times.",
-                    additional_info.get(0).unwrap_or(&info_placeholder),
+                    additional_info.first().unwrap_or(&info_placeholder),
                     additional_info.get(1).unwrap_or(&info_placeholder),
                 )
                 .as_str(),
@@ -178,7 +181,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
             ret.push_str(
                 format!(
                     "No such CPU available in the pool. User provided `{}` contains CPU {}, which is not available in the pool.\nYou can add a specific CPU to the CPU pool by editing the `cpu_pool` value from '/etc/nitro_enclaves/allocator.yaml' and then enable the nitro-enclaves-allocator.service.",
-                    additional_info.get(0).unwrap_or(&info_placeholder),
+                    additional_info.first().unwrap_or(&info_placeholder),
                     additional_info.get(1).unwrap_or(&info_placeholder),
                 ).as_str(),
             );
@@ -187,7 +190,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
             ret.push_str(
                 format!(
                     "Insufficient CPUs available in the pool. User provided `{}` is {}, which is more than the configured CPU pool size.\nYou can increase the CPU pool size by editing the `cpu_count` value from '/etc/nitro_enclaves/allocator.yaml' and then enable the nitro-enclaves-allocator.service.",
-                    additional_info.get(0).unwrap_or(&info_placeholder),
+                    additional_info.first().unwrap_or(&info_placeholder),
                     additional_info.get(1).unwrap_or(&info_placeholder),
                 ).as_str(),
             );
@@ -206,7 +209,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
                 ret.push_str(
                     format!(
                         "Insufficient memory requested. User provided `{}` is {} MB, but based on the EIF file size, the minimum memory should be {} MB",
-                        additional_info.get(0).unwrap_or(&info_placeholder),
+                        additional_info.first().unwrap_or(&info_placeholder),
                         additional_info.get(1).unwrap_or(&info_placeholder),
                         additional_info.get(2).unwrap_or(&info_placeholder)
                     ).as_str(),
@@ -214,8 +217,8 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
             } else {
                 ret.push_str(
                     format!(
-                        "Insufficient memory requested. User provided `{}` is {} MB, and memory should be greated than 0 MB.",
-                        additional_info.get(0).unwrap_or(&info_placeholder),
+                        "Insufficient memory requested. User provided `{}` is {} MB, and memory should be greater than 0 MB.",
+                        additional_info.first().unwrap_or(&info_placeholder),
                         additional_info.get(1).unwrap_or(&info_placeholder)
                     ).as_str(),
                 );
@@ -224,8 +227,8 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
         "E27" => {
             ret.push_str(
                 format!(
-                    "Insufficient memory available. User provided `{}` is {} MB, which is more than the available hugepage memory.\nYou can increase the available memory by editing the `memory_mib` value from '/etc/nitro_enclaves/allocator.yaml' and then enable the nitro-enclaves-allocator.service.",
-                    additional_info.get(0).unwrap_or(&info_placeholder),
+                    "Insufficient memory available. User provided `{}` is {} MB, which is more than the available hugepage memory.\nYou can increase the available memory by editing the `memory_mib` value from '/etc/nitro_enclaves/allocator.yaml' and then restart the nitro-enclaves-allocator.service.",
+                    additional_info.first().unwrap_or(&info_placeholder),
                     additional_info.get(1).unwrap_or(&info_placeholder)
                 ).as_str(),
             );
@@ -252,7 +255,7 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
             ret.push_str("Memory overflow. Such error may appear during loading the EIF in the memory regions which will be conceded to the future enclave, if the regions offset plus the EIF file size exceeds the maximum address of the target platform.");
         }
         "E35" => {
-            ret.push_str("EIF file parsing error. Such error appears when attempting to fill a memory region with a section of the EIF file, but reading the entire section fails.");
+            ret.push_str("EIF file parsing error. Such errors appear when attempting to fill a memory region with a section of the EIF file, but reading the entire section fails. This might indicate that the required hugepages are not available.");
         }
         "E36" => {
             ret.push_str("Enclave boot failure. Such error appears when attempting to receive the `ready` signal from a freshly booted enclave. It arises in several contexts, for instance, when the enclave is booted from an invalid EIF file and the enclave process immediately exits, failing to submit the `ready` signal. In this case, the error backtrace provides detailed information on what specifically failed during the enclave boot process.");
@@ -321,6 +324,15 @@ pub fn get_detailed_info(error_code_str: String, additional_info: &[String]) -> 
         "E56" => {
             ret.push_str("Logger error. Such error appears when attempting to initialize the underlying logging system fails.");
         }
+        "E57" => {
+            ret.push_str("Hasher error. Such error appears when trying to initialize a hasher or write bytes to it, resulting in a IO error.");
+        }
+        "E58" => {
+            ret.push_str("Naming error. Such error appears when trying to perform an enclave operation using the enclave name and the name is invalid.");
+        }
+        "E59" => {
+            ret.push_str("EIF signature checker error. Such error appears when validation of the signing certificate fails.");
+        }
         _ => {
             ret.push_str(format!("No such error code {}", error_code_str).as_str());
         }
@@ -339,25 +351,16 @@ pub fn construct_help_link(error_code_str: String) -> String {
 
 /// Returns a string containing the backtrace recorded during propagating an error message
 pub fn construct_backtrace(failure_info: &NitroCliFailure) -> String {
-    let mut ret = String::new();
-    let commit_id = env!("COMMIT_ID");
+    let version = env!("CARGO_PKG_VERSION").to_string();
 
-    ret.push_str(&format!("  Action: {}\n  Subactions:", failure_info.action));
-    for subaction in failure_info.subactions.iter().rev() {
-        ret.push_str(&format!("\n    {}", subaction));
-    }
-    ret.push_str(&format!("\n  Root error file: {}", failure_info.file));
-    ret.push_str(&format!("\n  Root error line: {}", failure_info.line));
-
-    ret.push_str(&format!(
-        "\n  Build commit: {}",
-        match commit_id.len() {
-            0 => "not available",
-            _ => commit_id,
-        }
-    ));
-
-    ret
+    format!("  Action: {}\n  Subactions:{}\n  Root error file: {}\n  Root error line: {}\n  Version: {}",
+        failure_info.action,
+        failure_info.subactions.iter().rev().fold("".to_string(), |acc, x| {
+            format!("{}\n    {}", acc, x)
+        }),
+        failure_info.file,
+        failure_info.line,
+        version)
 }
 
 /// Detailed information based on user-provided error code.
@@ -471,7 +474,7 @@ pub fn explain_error(error_code_str: String) {
             eprintln!("Memory overflow. Such error may appear during loading the EIF in the memory regions which will be conceded to the future enclave, if the regions offset plus the EIF file size exceeds the maximum address of the target platform.");
         }
         "E35" => {
-            eprintln!("EIF file parsing error. Such error appears when attempting to fill a memory region with a section of the EIF file, but reading the entire section fails.");
+            eprintln!("EIF file parsing error. Such errors appear when attempting to fill a memory region with a section of the EIF file, but reading the entire section fails. This might indicate that the required hugepages are not available.");
         }
         "E36" => {
             eprintln!("Enclave boot failure. Such error appears when attempting to receive the `ready` signal from a freshly booted enclave. It arises in several contexts, for instance, when the enclave is booted from an invalid EIF file and the enclave process immediately exits, failing to submit the `ready` signal. In this case, the error backtrace provides detailed information on what specifically failed during the enclave boot process.");
@@ -543,5 +546,30 @@ pub fn explain_error(error_code_str: String) {
         _ => {
             eprintln!("No such error code {}", error_code_str);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NitroCliFailure;
+    use crate::common::document_errors::construct_backtrace;
+
+    #[test]
+    fn test_construct_backtrace() {
+        let failure = NitroCliFailure::new()
+            .set_action(String::from("ABCD"))
+            .add_subaction(String::from("EFGH"))
+            .add_subaction(String::from("IJKL"))
+            .set_file_and_line("/path/file.txt", 1234);
+        // "  Action: ABCD
+        //    Subactions:
+        //      IJKL
+        //      EFGH
+        //    Root error file: /path/file.txt
+        //    Root error line: 1234
+        //    Version: X.Y.Z"
+        let expected = format!("  Action: ABCD\n  Subactions:\n    IJKL\n    EFGH\n  Root error file: /path/file.txt\n  Root error line: 1234\n  Version: {}",
+            env!("CARGO_PKG_VERSION"));
+        assert_eq!(expected, construct_backtrace(&failure));
     }
 }
